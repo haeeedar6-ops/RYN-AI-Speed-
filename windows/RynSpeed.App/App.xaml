@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Application
+    x:Class="RynSpeed.App.App"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    RequestedTheme="Dark">
+    <Application.Resources>
+        <ResourceDictionary>
+            <ResourceDictionary.MergedDictionaries>
+                <XamlControlsResources xmlns="using:Microsoft.UI.Xaml.Controls" />
+            </ResourceDictionary.MergedDictionaries>
+            <SolidColorBrush x:Key="RynBackgroundBrush" Color="#0B1114" />
+            <SolidColorBrush x:Key="RynSurfaceBrush" Color="#111A1E" />
+            <SolidColorBrush x:Key="RynEmeraldBrush" Color="#10B981" />
+            <SolidColorBrush x:Key="RynTextPrimaryBrush" Color="#ECFDF5" />
+        </ResourceDictionary>
+    </Application.Resources>
+</Application>

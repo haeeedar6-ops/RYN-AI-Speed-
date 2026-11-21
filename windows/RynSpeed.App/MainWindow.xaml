@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Window
+    x:Class="RynSpeed.App.MainWindow"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    Title="RYN-AI-Speed">
+    <Grid Background="{StaticResource RynBackgroundBrush}" Padding="32">
+        <StackPanel VerticalAlignment="Center" HorizontalAlignment="Center" Spacing="12">
+            <TextBlock
+                Text="RYN-AI-Speed"
+                FontSize="32"
+                FontWeight="Bold"
+                Foreground="{StaticResource RynEmeraldBrush}"
+                HorizontalAlignment="Center" />
+            <TextBlock
+                Text="Encrypted Core Foundation Ready (Phase P1)"
+                FontSize="15"
+                Foreground="{StaticResource RynTextPrimaryBrush}"
+                HorizontalAlignment="Center" />
+        </StackPanel>
+    </Grid>
+</Window>
