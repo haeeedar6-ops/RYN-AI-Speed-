@@ -1,0 +1,314 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "registry_version": "1.0.0",
+  "description": "Strict AI Tool Registry for RYN-AI-Speed v2.0. Only these 12 tools are permitted. All arguments enforce additionalProperties=false.",
+  "permission_levels": {
+    "READ": "Read-only telemetry or state lookup. Safe to run automatically.",
+    "SAFE_ACTION": "Bounded, reversible operational action within user-configured limits.",
+    "PROTECTED_ACTION": "High-impact network or destructive action. ALWAYS requires explicit user confirmation UI tap with single-use nonce."
+  },
+  "tools": [
+    {
+      "name": "get_network_stats",
+      "description": "Return current real network metrics (ping, jitter, packet loss, active interface, VPN state).",
+      "permission_level": "READ",
+      "requires_confirmation": false,
+      "timeout_ms": 5000,
+      "audit_required": true,
+      "input_schema": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "include_history_count": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 20,
+            "default": 5
+          }
+        }
+      },
+      "output_schema": {
+        "type": "object",
+        "required": ["network_type", "vpn_active", "ping_ms", "jitter_ms", "packet_loss_pct"],
+        "properties": {
+          "network_type": { "type": "string" },
+          "vpn_active": { "type": "boolean" },
+          "ping_ms": { "type": ["number", "null"] },
+          "jitter_ms": { "type": ["number", "null"] },
+          "packet_loss_pct": { "type": ["number", "null"] }
+        }
+      }
+    },
+    {
+      "name": "run_speed_test",
+      "description": "Execute a real network ping, download, and upload benchmark.",
+      "permission_level": "SAFE_ACTION",
+      "requires_confirmation": false,
+      "timeout_ms": 30000,
+      "audit_required": true,
+      "input_schema": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "mode": {
+            "type": "string",
+            "enum": ["QUICK", "FULL"],
+            "default": "QUICK"
+          }
+        }
+      },
+      "output_schema": {
+        "type": "object",
+        "required": ["download_mbps", "upload_mbps", "ping_ms", "jitter_ms", "vpn_active"],
+        "properties": {
+          "download_mbps": { "type": "number" },
+          "upload_mbps": { "type": "number" },
+          "ping_ms": { "type": "number" },
+          "jitter_ms": { "type": "number" },
+          "vpn_active": { "type": "boolean" }
+        }
+      }
+    },
+    {
+      "name": "get_dns_info",
+      "description": "Inspect active DNS resolvers and benchmark latency against trusted resolvers.",
+      "permission_level": "READ",
+      "requires_confirmation": false,
+      "timeout_ms": 8000,
+      "audit_required": true,
+      "input_schema": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "run_benchmark": {
+            "type": "boolean",
+            "default": false
+          }
+        }
+      },
+      "output_schema": {
+        "type": "object",
+        "required": ["active_resolvers", "dns_leak_detected"],
+        "properties": {
+          "active_resolvers": { "type": "array", "items": { "type": "string" } },
+          "dns_leak_detected": { "type": "boolean" }
+        }
+      }
+    },
+    {
+      "name": "list_vpn_servers",
+      "description": "List verified Private and Community WireGuard servers sorted by weighted quality score.",
+      "permission_level": "READ",
+      "requires_confirmation": false,
+      "timeout_ms": 5000,
+      "audit_required": true,
+      "input_schema": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "country": { "type": "string", "pattern": "^[A-Z]{2}$" },
+          "server_type": { "type": "string", "enum": ["PRIVATE", "COMMUNITY", "ALL"], "default": "ALL" },
+          "limit": { "type": "integer", "minimum": 1, "maximum": 50, "default": 10 }
+        }
+      },
+      "output_schema": {
+        "type": "object",
+        "required": ["servers"],
+        "properties": {
+          "servers": { "type": "array" }
+        }
+      }
+    },
+    {
+      "name": "connect_vpn",
+      "description": "Establish a verified WireGuard VPN tunnel to a specific server or auto-best server.",
+      "permission_level": "PROTECTED_ACTION",
+      "requires_confirmation": true,
+      "timeout_ms": 20000,
+      "audit_required": true,
+      "input_schema": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["server_id"],
+        "properties": {
+          "server_id": { "type": "string", "minLength": 2, "maxLength": 64 }
+        }
+      },
+      "output_schema": {
+        "type": "object",
+        "required": ["connected", "server_id", "verified_exit_check"],
+        "properties": {
+          "connected": { "type": "boolean" },
+          "server_id": { "type": "string" },
+          "verified_exit_check": { "type": "boolean" }
+        }
+      }
+    },
+    {
+      "name": "disconnect_vpn",
+      "description": "Disconnect the active WireGuard VPN tunnel cleanly.",
+      "permission_level": "PROTECTED_ACTION",
+      "requires_confirmation": true,
+      "timeout_ms": 10000,
+      "audit_required": true,
+      "input_schema": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {}
+      },
+      "output_schema": {
+        "type": "object",
+        "required": ["disconnected"],
+        "properties": {
+          "disconnected": { "type": "boolean" }
+        }
+      }
+    },
+    {
+      "name": "get_downloads",
+      "description": "Retrieve current download queue summaries (file names, status, progress, speed; omits sensitive query tokens).",
+      "permission_level": "READ",
+      "requires_confirmation": false,
+      "timeout_ms": 5000,
+      "audit_required": true,
+      "input_schema": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "status_filter": {
+            "type": "string",
+            "enum": ["ALL", "DOWNLOADING", "PAUSED", "QUEUED", "FAILED", "COMPLETED"],
+            "default": "ALL"
+          }
+        }
+      },
+      "output_schema": {
+        "type": "object",
+        "required": ["downloads"],
+        "properties": {
+          "downloads": { "type": "array" }
+        }
+      }
+    },
+    {
+      "name": "pause_download",
+      "description": "Pause an active download while preserving segment checkpoints.",
+      "permission_level": "SAFE_ACTION",
+      "requires_confirmation": false,
+      "timeout_ms": 5000,
+      "audit_required": true,
+      "input_schema": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["download_id"],
+        "properties": {
+          "download_id": { "type": "string", "minLength": 1, "maxLength": 64 }
+        }
+      },
+      "output_schema": {
+        "type": "object",
+        "required": ["download_id", "status"],
+        "properties": {
+          "download_id": { "type": "string" },
+          "status": { "type": "string" }
+        }
+      }
+    },
+    {
+      "name": "resume_download",
+      "description": "Resume a paused or failed download with strict ETag/If-Range validation.",
+      "permission_level": "SAFE_ACTION",
+      "requires_confirmation": false,
+      "timeout_ms": 8000,
+      "audit_required": true,
+      "input_schema": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["download_id"],
+        "properties": {
+          "download_id": { "type": "string", "minLength": 1, "maxLength": 64 }
+        }
+      },
+      "output_schema": {
+        "type": "object",
+        "required": ["download_id", "status"],
+        "properties": {
+          "download_id": { "type": "string" },
+          "status": { "type": "string" }
+        }
+      }
+    },
+    {
+      "name": "cancel_download",
+      "description": "Cancel a download and optionally remove its temporary .ryntmp file.",
+      "permission_level": "PROTECTED_ACTION",
+      "requires_confirmation": true,
+      "timeout_ms": 5000,
+      "audit_required": true,
+      "input_schema": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["download_id"],
+        "properties": {
+          "download_id": { "type": "string", "minLength": 1, "maxLength": 64 },
+          "delete_temp_file": { "type": "boolean", "default": true }
+        }
+      },
+      "output_schema": {
+        "type": "object",
+        "required": ["download_id", "canceled"],
+        "properties": {
+          "download_id": { "type": "string" },
+          "canceled": { "type": "boolean" }
+        }
+      }
+    },
+    {
+      "name": "set_download_limit",
+      "description": "Configure global or per-download speed cap in bytes per second (0 = unlimited).",
+      "permission_level": "SAFE_ACTION",
+      "requires_confirmation": false,
+      "timeout_ms": 5000,
+      "audit_required": true,
+      "input_schema": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["speed_limit_bps"],
+        "properties": {
+          "download_id": { "type": ["string", "null"] },
+          "speed_limit_bps": { "type": "integer", "minimum": 0, "maximum": 1000000000 }
+        }
+      },
+      "output_schema": {
+        "type": "object",
+        "required": ["applied", "speed_limit_bps"],
+        "properties": {
+          "applied": { "type": "boolean" },
+          "speed_limit_bps": { "type": "integer" }
+        }
+      }
+    },
+    {
+      "name": "get_server_health",
+      "description": "Query live health, latency, packet loss, and capacity status for VPN servers.",
+      "permission_level": "READ",
+      "requires_confirmation": false,
+      "timeout_ms": 6000,
+      "audit_required": true,
+      "input_schema": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "server_id": { "type": ["string", "null"] }
+        }
+      },
+      "output_schema": {
+        "type": "object",
+        "required": ["items"],
+        "properties": {
+          "items": { "type": "array" }
+        }
+      }
+    }
+  ]
+}

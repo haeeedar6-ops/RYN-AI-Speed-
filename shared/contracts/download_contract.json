@@ -1,0 +1,49 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "contract_version": "1.0.0",
+  "title": "RYN-AI-Speed Cross-Platform Download Engine Contract",
+  "description": "Shared state machine, segment schema, and error taxonomy enforced identically by Android (Kotlin) and Windows (C# .NET 10).",
+  "download_states": [
+    "QUEUED",
+    "PROBING",
+    "DOWNLOADING",
+    "PAUSED",
+    "RETRYING",
+    "VERIFYING",
+    "COMPLETED",
+    "FAILED",
+    "CANCELED"
+  ],
+  "segment_states": [
+    "PENDING",
+    "CONNECTING",
+    "DOWNLOADING",
+    "COMPLETED",
+    "FAILED",
+    "RETRYING"
+  ],
+  "error_codes": [
+    "INVALID_URL_SCHEME",
+    "SSRF_BLOCKED",
+    "UNSAFE_FILENAME",
+    "INSUFFICIENT_DISK_SPACE",
+    "AUTH_OR_EXPIRED_LINK",
+    "RESOURCE_NOT_FOUND",
+    "RATE_LIMITED_429",
+    "SERVER_FILE_CHANGED_IF_RANGE",
+    "CHECKSUM_MISMATCH",
+    "NETWORK_UNREACHABLE",
+    "IO_WRITE_ERROR"
+  ],
+  "segmentation_policy": {
+    "min_ranged_file_bytes": 2097152,
+    "work_stealing_min_remaining_bytes": 4194304,
+    "default_max_connections": 8,
+    "hard_max_connections": 16,
+    "checkpoint_flush_bytes": 524288,
+    "checkpoint_flush_ms": 500,
+    "disk_safety_buffer_bytes": 52428800,
+    "require_if_range_on_resume": true,
+    "sparse_temp_extension": ".ryntmp"
+  }
+}
