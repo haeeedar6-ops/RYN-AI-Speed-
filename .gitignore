@@ -1,0 +1,92 @@
+# ==========================================================
+# RYN-AI-Speed — Security-Hardened .gitignore
+# ==========================================================
+
+# --- Secrets, Keys & Certificates (NEVER COMMIT) ---
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+*.jks
+*.keystore
+*.cer
+*.crt
+*.der
+*.mobileprovision
+google-services.json
+local.properties
+secrets.properties
+signing.properties
+wg*.conf
+*wireguard*.conf
+
+# --- Android / Gradle / Kotlin ---
+android/.gradle/
+android/build/
+android/*/build/
+android/.idea/
+android/*.iml
+android/captures/
+android/.cxx/
+android/.externalNativeBuild/
+*.apk
+*.aab
+*.ap_
+*.dex
+
+# --- Windows / .NET / Visual Studio / WinUI 3 ---
+windows/bin/
+windows/obj/
+windows/*/bin/
+windows/*/obj/
+windows/.vs/
+windows/AppPackages/
+windows/BundleArtifacts/
+*.user
+*.suo
+*.userosscache
+*.sln.docstates
+*.msix
+*.msixbundle
+*.appx
+*.appxsym
+TestResults/
+
+# --- Backend / Python ---
+backend/__pycache__/
+backend/*/__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+ENV/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# --- Databases & Local Runtime Artifacts ---
+*.db
+*.db-shm
+*.db-wal
+*.sqlite
+*.sqlite3
+*.ryntmp
+*.part
+logs/
+*.log
+
+# --- OS & Editor Junk ---
+.DS_Store
+Thumbs.db
+desktop.ini
+*.swp
+*.swo
+*~
+.vscode/*
+!.vscode/extensions.json
+!.vscode/settings.json
