@@ -5,7 +5,7 @@ plugins {
 }
 
 android {
-    namespace = "com.ryn.aispeed.feature.browser"
+    namespace = "com.ryn.aispeed.feature.downloads"
     compileSdk = 35
     defaultConfig { minSdk = 26 }
     compileOptions {
@@ -20,9 +20,11 @@ dependencies {
     implementation(project(":core:common"))
     implementation(project(":core:security"))
     implementation(project(":core:database"))
-    implementation(project(":feature:downloads"))
 
-    implementation(libs.androidx.core.ktx)
+    implementation(libs.kotlinx.coroutines.core)
+    implementation(libs.kotlinx.coroutines.android)
+    implementation(libs.okhttp)
+    implementation(libs.androidx.work.runtime.ktx)
     implementation(platform(libs.androidx.compose.bom))
     implementation(libs.androidx.compose.ui)
     implementation(libs.androidx.compose.material3)

@@ -1,7 +1,9 @@
+using System.Diagnostics.CodeAnalysis;
 using System.Threading.Channels;
 
 namespace RynSpeed.Core;
 
+[SuppressMessage("Design", "CA1000:Do not declare static members on generic types", Justification = "Factory methods on immutable Result<T>")]
 public sealed record RynResult<T>(bool IsSuccess, T? Value, string? ErrorCode, string? ErrorMessage)
 {
     public static RynResult<T> Ok(T value) => new(true, value, null, null);

@@ -16,6 +16,14 @@ android {
     kotlinOptions { jvmTarget = "17" }
 }
 
+hilt {
+    enableAggregatingTask = false
+}
+
+ksp {
+    arg("room.schemaLocation", "$projectDir/schemas")
+}
+
 dependencies {
     implementation(project(":core:common"))
     implementation(project(":core:security"))
