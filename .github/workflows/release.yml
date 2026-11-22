@@ -74,17 +74,14 @@ jobs:
       - uses: actions/setup-dotnet@v4
         with:
           dotnet-version: '10.0.x'
-      - name: Restore & Build Release Libraries
+      - name: Restore & Publish Windows App (win-x64 Self-Contained)
         run: |
           dotnet restore RynSpeed.sln
-          dotnet build RynSpeed.Core/RynSpeed.Core.csproj -c Release --no-restore
-          dotnet build RynSpeed.Security/RynSpeed.Security.csproj -c Release --no-restore
-          dotnet build RynSpeed.Database/RynSpeed.Database.csproj -c Release --no-restore
-          dotnet build RynSpeed.Downloads/RynSpeed.Downloads.csproj -c Release --no-restore
-          dotnet build RynSpeed.Browser/RynSpeed.Browser.csproj -c Release --no-restore
-          dotnet build RynSpeed.Network/RynSpeed.Network.csproj -c Release --no-restore
-          dotnet build RynSpeed.VPN/RynSpeed.VPN.csproj -c Release --no-restore
-          dotnet build RynSpeed.AI/RynSpeed.AI.csproj -c Release --no-restore
+          dotnet publish RynSpeed.App/RynSpeed.App.csproj -c Release -r win-x64 --self-contained true -o ../windows-publish
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-release
+          path: windows-publish/**
 
   publish-github-release:
     needs: [build-android-release, build-windows-release]
