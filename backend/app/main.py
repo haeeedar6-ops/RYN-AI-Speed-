@@ -1,18 +1,36 @@
-"""RYN-AI-Speed Backend Foundation (Phase P1) — FastAPI Entrypoint."""
+"""RYN-AI-Speed Backend (Phase P6) — Auth, Signed VPN Server Registry, Rate Limiting & Config."""
 
 from __future__ import annotations
 
+import os
 import uuid
+from dataclasses import asdict
 from typing import Any
 
-from fastapi import FastAPI, Query, Request
+from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request, Response
 from fastapi.responses import JSONResponse
+from pydantic import BaseModel, Field
 
+from app.auth.service import AuthError, AuthService
 from app.core.config import get_settings
 from app.core.logging import configure_logging
+from app.core.rate_limit import IdempotencyGuard, SlidingWindowRateLimiter
+from app.core.security import Ed25519Signer
+from app.servers.registry import VpnServerRegistry
 
 settings = get_settings()
 configure_logging(settings.log_level)
+
+_pem = os.getenv("JWT_PRIVATE_KEY_PEM", "").strip()
+signer = Ed25519Signer.from_pem(_pem) if _pem else Ed25519Signer()
+auth_service = AuthService(
+    signer=signer,
+    access_ttl_sec=settings.access_token_ttl_seconds,
+    refresh_ttl_days=settings.refresh_token_ttl_days,
+)
+server_registry = VpnServerRegistry(signer=signer)
+rate_limiter = SlidingWindowRateLimiter()
+idempotency_guard = IdempotencyGuard()
 
 app = FastAPI(
     title="RYN-AI-Speed Backend API",
@@ -20,6 +38,21 @@ app = FastAPI(
     docs_url="/docs" if settings.app_env != "production" else None,
     redoc_url=None,
 )
+
+
+def _problem(status: int, code: str, title: str, detail: str, request_id: str) -> JSONResponse:
+    return JSONResponse(
+        status_code=status,
+        media_type="application/problem+json",
+        content={
+            "type": f"https://ryn-ai-speed.example/errors/{code.lower()}",
+            "title": title,
+            "status": status,
+            "detail": detail,
+            "error_code": code,
+            "request_id": request_id,
+        },
+    )
 
 
 @app.middleware("http")
@@ -36,22 +69,65 @@ async def security_headers_and_request_id(request: Request, call_next: Any) -> A
     return response
 
 
+@app.exception_handler(AuthError)
+async def auth_error_handler(request: Request, exc: AuthError) -> JSONResponse:
+    return _problem(exc.status_code, exc.code, "Authentication Error", exc.message, request.state.request_id)
+
+
 @app.exception_handler(Exception)
 async def problem_details_exception_handler(request: Request, exc: Exception) -> JSONResponse:
-    """RFC 9457 Problem Details envelope with zero stack-trace leakage."""
     request_id = getattr(request.state, "request_id", str(uuid.uuid4()))
-    return JSONResponse(
-        status_code=500,
-        media_type="application/problem+json",
-        content={
-            "type": "https://ryn-ai-speed.example/errors/internal-error",
-            "title": "Internal Server Error",
-            "status": 500,
-            "detail": "An unexpected error occurred.",
-            "error_code": "INTERNAL_SERVER_ERROR",
-            "request_id": request_id,
-        },
-    )
+    return _problem(500, "INTERNAL_SERVER_ERROR", "Internal Server Error", "An unexpected error occurred.", request_id)
+
+
+def require_rate_limit(route_group: str, limit: int, window_sec: int = 60) -> Any:
+    def _dep(request: Request, response: Response) -> None:
+        client_ip = request.client.host if request.client else "unknown"
+        allowed, remaining, retry_after = rate_limiter.check_and_consume(
+            f"{route_group}:{client_ip}", limit=limit, window_seconds=window_sec
+        )
+        response.headers["X-RateLimit-Limit"] = str(limit)
+        response.headers["X-RateLimit-Remaining"] = str(remaining)
+        if not allowed:
+            raise HTTPException(
+                status_code=429,
+                detail="Rate limit exceeded",
+                headers={"Retry-After": str(retry_after)},
+            )
+    return _dep
+
+
+def get_current_claims(authorization: str = Header(...)) -> dict[str, Any]:
+    if not authorization.startswith("Bearer "):
+        raise AuthError("MISSING_BEARER_TOKEN", "Bearer token required.", 401)
+    token = authorization[7:].strip()
+    try:
+        return signer.verify_jwt(token)
+    except Exception as exc:
+        raise AuthError("INVALID_ACCESS_TOKEN", "Access token is invalid or expired.", 401) from exc
+
+
+class RegisterPayload(BaseModel):
+    email: str = Field(..., min_length=5, max_length=254)
+    password: str = Field(..., min_length=12, max_length=128)
+    display_name: str | None = Field(default=None, max_length=80)
+    device_uuid: str = Field(..., min_length=8, max_length=64)
+    platform: str = Field(..., pattern="^(ANDROID|WINDOWS)$")
+    device_name: str = Field(..., min_length=1, max_length=80)
+    app_version: str = Field(..., min_length=1, max_length=32)
+
+
+class LoginPayload(BaseModel):
+    email: str = Field(..., min_length=5, max_length=254)
+    password: str = Field(..., min_length=1, max_length=128)
+    device_uuid: str = Field(..., min_length=8, max_length=64)
+    platform: str = Field(..., pattern="^(ANDROID|WINDOWS)$")
+    app_version: str = Field(..., min_length=1, max_length=32)
+
+
+class RefreshPayload(BaseModel):
+    refresh_token: str = Field(..., min_length=32)
+    device_uuid: str = Field(..., min_length=8, max_length=64)
 
 
 @app.get("/health", tags=["system"])
@@ -59,8 +135,63 @@ async def health_check() -> dict[str, str]:
     return {"status": "ok", "version": settings.app_version, "env": settings.app_env}
 
 
+@app.post("/api/v1/auth/register", status_code=201, tags=["auth"], dependencies=[Depends(require_rate_limit("auth_reg", 5, 60))])
+async def register_user(
+    payload: RegisterPayload,
+    idempotency_key: str = Header(..., alias="Idempotency-Key"),
+) -> dict[str, object]:
+    if not idempotency_guard.claim(f"reg:{idempotency_key}"):
+        raise AuthError("DUPLICATE_REQUEST", "Duplicate Idempotency-Key replay blocked.", 409)
+    return auth_service.register(payload.email, payload.password, payload.device_uuid, payload.display_name)
+
+
+@app.post("/api/v1/auth/login", tags=["auth"], dependencies=[Depends(require_rate_limit("auth_login", 10, 60))])
+async def login_user(payload: LoginPayload) -> dict[str, object]:
+    return auth_service.login(payload.email, payload.password, payload.device_uuid)
+
+
+@app.post("/api/v1/auth/refresh", tags=["auth"], dependencies=[Depends(require_rate_limit("auth_refresh", 20, 60))])
+async def refresh_tokens(payload: RefreshPayload) -> dict[str, object]:
+    return auth_service.refresh(payload.refresh_token, payload.device_uuid)
+
+
+@app.post("/api/v1/auth/logout", status_code=204, tags=["auth"])
+async def logout_user(claims: dict[str, Any] = Depends(get_current_claims)) -> Response:
+    auth_service.logout(str(claims["sub"]), str(claims["dev"]))
+    return Response(status_code=204)
+
+
+@app.get("/api/v1/servers", tags=["vpn"])
+async def list_vpn_servers(
+    response: Response,
+    country: str | None = Query(default=None, pattern="^[A-Z]{2}$"),
+    server_type: str | None = Query(default=None, pattern="^(PRIVATE|COMMUNITY)$"),
+    _claims: dict[str, Any] = Depends(get_current_claims),
+) -> dict[str, object]:
+    payload, signature = server_registry.list_signed_manifest(country=country, server_type=server_type)
+    response.headers["X-Manifest-Signature"] = signature
+    return payload
+
+
+@app.get("/api/v1/servers/health", tags=["vpn"])
+async def get_servers_health(_claims: dict[str, Any] = Depends(get_current_claims)) -> dict[str, object]:
+    return server_registry.health_summary()
+
+
+@app.get("/api/v1/servers/{server_id}", tags=["vpn"])
+async def get_vpn_server_by_id(
+    server_id: str,
+    request: Request,
+    _claims: dict[str, Any] = Depends(get_current_claims),
+) -> Any:
+    rec = server_registry.get_server(server_id)
+    if rec is None:
+        return _problem(404, "SERVER_NOT_FOUND", "Not Found", f"Server '{server_id}' not found.", request.state.request_id)
+    return asdict(rec)
+
+
 @app.get("/api/v1/config", tags=["config"])
-async def get_app_config() -> dict[str, Any]:
+async def get_app_config(_claims: dict[str, Any] = Depends(get_current_claims)) -> dict[str, Any]:
     return {
         "policy_version": settings.policy_version,
         "feature_flags": {
@@ -73,9 +204,7 @@ async def get_app_config() -> dict[str, Any]:
 
 
 @app.get("/api/v1/version", tags=["version"])
-async def get_latest_version(
-    platform: str = Query(..., pattern="^(ANDROID|WINDOWS)$"),
-) -> dict[str, str]:
+async def get_latest_version(platform: str = Query(..., pattern="^(ANDROID|WINDOWS)$")) -> dict[str, str]:
     return {
         "platform": platform,
         "latest_version": settings.app_version,
@@ -83,5 +212,5 @@ async def get_latest_version(
         "download_url": f"https://releases.ryn-ai-speed.example/{platform.lower()}/v{settings.app_version}",
         "checksum_sha256": "pending_p11_signed_release",
         "signature_ed25519": "pending_p11_signed_release",
-        "release_notes_md": f"RYN-AI-Speed v{settings.app_version} Foundation Build",
+        "release_notes_md": f"RYN-AI-Speed v{settings.app_version}",
     }
