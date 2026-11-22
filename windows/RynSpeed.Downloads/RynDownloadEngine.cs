@@ -1,5 +1,6 @@
 using System.Net;
 using System.Net.Http.Headers;
+using System.Net.Sockets;
 using RynSpeed.Core;
 using RynSpeed.Security;
 
@@ -17,6 +18,7 @@ public sealed class RynDownloadEngine : IDisposable
     private readonly string _rootDownloadDir;
     private readonly bool _allowLocalNetwork;
     private readonly TokenBucketLimiter _globalLimiter = new(0L);
+    private const int MaxRedirects = 5;
 
     public RynDownloadEngine(ModuleEventBus eventBus, string rootDownloadDir, bool allowLocalNetwork = false)
     {
@@ -30,6 +32,11 @@ public sealed class RynDownloadEngine : IDisposable
             ConnectTimeout = TimeSpan.FromSeconds(15),
             AutomaticDecompression = DecompressionMethods.None
         };
+        if (!allowLocalNetwork)
+        {
+            // Anti DNS-rebinding: validate the address we REALLY connect to, not only the one resolved earlier.
+            handler.ConnectCallback = SsrfSafeConnectAsync;
+        }
         _http = new HttpClient(handler) { Timeout = Timeout.InfiniteTimeSpan };
     }
 
@@ -42,15 +49,19 @@ public sealed class RynDownloadEngine : IDisposable
                 .ValidateDownloadUrlAsync(rawUrl, _allowLocalNetwork, token)
                 .ConfigureAwait(false);
 
-            for (var hop = 0; hop < 5; hop++)
+            for (var hop = 0; ; hop++)
             {
-                using var headReq = new HttpRequestMessage(HttpMethod.Head, currentUri);
-                using var headResp = await _http.SendAsync(headReq, HttpCompletionOption.ResponseHeadersRead, token).ConfigureAwait(false);
+                // One ranged GET (bytes=0-0) gives redirects, size, Range support and validators together.
+                using var rangeReq = new HttpRequestMessage(HttpMethod.Get, currentUri);
+                rangeReq.Headers.Range = new RangeHeaderValue(0, 0);
+                using var rangeResp = await _http.SendAsync(rangeReq, HttpCompletionOption.ResponseHeadersRead, token).ConfigureAwait(false);
 
-                if (headResp.StatusCode is HttpStatusCode.MovedPermanently or HttpStatusCode.Found or
+                if (rangeResp.StatusCode is HttpStatusCode.MovedPermanently or HttpStatusCode.Found or
                     HttpStatusCode.SeeOther or HttpStatusCode.TemporaryRedirect or HttpStatusCode.PermanentRedirect)
                 {
-                    var location = headResp.Headers.Location
+                    if (hop >= MaxRedirects)
+                        throw new InvalidOperationException("TOO_MANY_REDIRECTS: Redirect limit exceeded.");
+                    var location = rangeResp.Headers.Location
                         ?? throw new InvalidOperationException("Redirect without Location header.");
                     var nextUri = location.IsAbsoluteUri ? location : new Uri(currentUri, location);
                     currentUri = await UrlAndPathValidator
@@ -59,33 +70,31 @@ public sealed class RynDownloadEngine : IDisposable
                     continue;
                 }
 
-                CheckFatalStatus(headResp.StatusCode);
-                break;
+                CheckFatalStatus(rangeResp.StatusCode);
+                if (!rangeResp.IsSuccessStatusCode)
+                    throw new HttpRequestException($"Unexpected HTTP {(int)rangeResp.StatusCode}");
+
+                var supportsRanges = rangeResp.StatusCode == HttpStatusCode.PartialContent;
+                // A 206 with unknown total ("bytes 0-0/*") must not fall back to Content-Length (that is 1).
+                var totalSize = supportsRanges
+                    ? rangeResp.Content.Headers.ContentRange?.Length
+                    : rangeResp.Content.Headers.ContentLength;
+                var rawName = rangeResp.Content.Headers.ContentDisposition?.FileNameStar
+                    ?? rangeResp.Content.Headers.ContentDisposition?.FileName?.Trim('"')
+                    ?? Path.GetFileName(currentUri.LocalPath);
+                var safeName = UrlAndPathValidator.SanitizeFileName(string.IsNullOrWhiteSpace(rawName) ? "download.bin" : rawName);
+                var mime = rangeResp.Content.Headers.ContentType?.MediaType;
+
+                return new ProbeResult(
+                    FinalUri: currentUri,
+                    FileName: safeName,
+                    Category: DownloadPolicy.ClassifyCategory(safeName, mime),
+                    MimeType: mime,
+                    FileSize: totalSize,
+                    SupportsRanges: supportsRanges,
+                    ETag: rangeResp.Headers.ETag?.ToString(),
+                    LastModified: rangeResp.Content.Headers.LastModified?.ToString("R", System.Globalization.CultureInfo.InvariantCulture));
             }
-
-            using var rangeReq = new HttpRequestMessage(HttpMethod.Get, currentUri);
-            rangeReq.Headers.Range = new RangeHeaderValue(0, 0);
-            using var rangeResp = await _http.SendAsync(rangeReq, HttpCompletionOption.ResponseHeadersRead, token).ConfigureAwait(false);
-            CheckFatalStatus(rangeResp.StatusCode);
-
-            var supportsRanges = rangeResp.StatusCode == HttpStatusCode.PartialContent;
-            var totalSize = rangeResp.Content.Headers.ContentRange?.Length
-                ?? rangeResp.Content.Headers.ContentLength;
-            var rawName = rangeResp.Content.Headers.ContentDisposition?.FileNameStar
-                ?? rangeResp.Content.Headers.ContentDisposition?.FileName?.Trim('"')
-                ?? Path.GetFileName(currentUri.LocalPath);
-            var safeName = UrlAndPathValidator.SanitizeFileName(string.IsNullOrWhiteSpace(rawName) ? "download.bin" : rawName);
-            var mime = rangeResp.Content.Headers.ContentType?.MediaType;
-
-            return new ProbeResult(
-                FinalUri: currentUri,
-                FileName: safeName,
-                Category: DownloadPolicy.ClassifyCategory(safeName, mime),
-                MimeType: mime,
-                FileSize: totalSize,
-                SupportsRanges: supportsRanges,
-                ETag: rangeResp.Headers.ETag?.Tag,
-                LastModified: rangeResp.Content.Headers.LastModified?.ToString("R"));
         }, ct);
 
     public Task<RynResult<(string FilePath, string Sha256)>> DownloadAsync(
@@ -105,11 +114,12 @@ public sealed class RynDownloadEngine : IDisposable
             var categoryDir = Path.Combine(_rootDownloadDir, probe.Category.ToLowerInvariant());
             Directory.CreateDirectory(categoryDir);
 
-            var finalPath = UrlAndPathValidator.ResolveSafeTargetPath(categoryDir, probe.FileName);
+            var finalPath = ClaimUniqueTarget(categoryDir, probe.FileName);
             var tempPath = finalPath + DownloadPolicy.SparseTempExtension;
             var connections = DownloadPolicy.ComputeOptimalConnections(probe.FileSize, probe.SupportsRanges, maxConnectionsCap);
             var itemLimiter = new TokenBucketLimiter(perDownloadLimitBps);
-            var ifRange = probe.ETag ?? probe.LastModified;
+            // If-Range needs a STRONG validator; a weak ETag (W/"..") would make servers answer 200.
+            var ifRange = probe.ETag is { } etag && !etag.StartsWith("W/", StringComparison.Ordinal) ? etag : probe.LastModified;
 
             using var writer = new SparseFileWriter(tempPath, finalPath);
             if (probe.SupportsRanges && probe.FileSize is >= DownloadPolicy.MinRangedFileBytes)
@@ -118,17 +128,28 @@ public sealed class RynDownloadEngine : IDisposable
                 var initial = BuildInitialSegments(downloadId, probe.FileSize.Value, connections);
                 var coordinator = new SegmentCoordinator(downloadId, initial);
 
+                // First failing worker cancels its siblings instead of letting them burn bandwidth.
+                using var workersCts = CancellationTokenSource.CreateLinkedTokenSource(token);
+                var workerToken = workersCts.Token;
                 var workers = Enumerable.Range(0, connections).Select(workerIdx => Task.Run(async () =>
                 {
-                    ActiveSegment? seg = initial[workerIdx];
-                    while (seg is not null)
+                    try
                     {
-                        await DownloadSegmentAsync(
-                            probe.FinalUri, seg, ifRange, writer, itemLimiter, downloadId, probe.FileSize.Value, token
-                        ).ConfigureAwait(false);
-                        seg = coordinator.StealWorkOrNull();
+                        ActiveSegment? seg = initial[workerIdx];
+                        while (seg is not null)
+                        {
+                            await DownloadSegmentAsync(
+                                probe.FinalUri, seg, ifRange, writer, itemLimiter, downloadId, probe.FileSize.Value, workerToken
+                            ).ConfigureAwait(false);
+                            seg = coordinator.StealWorkOrNull();
+                        }
                     }
-                }, token));
+                    catch (Exception) when (!workerToken.IsCancellationRequested)
+                    {
+                        await workersCts.CancelAsync().ConfigureAwait(false);
+                        throw;
+                    }
+                }, CancellationToken.None)).ToArray();
 
                 await Task.WhenAll(workers).ConfigureAwait(false);
             }
@@ -178,9 +199,12 @@ public sealed class RynDownloadEngine : IDisposable
                     var writePos = resumeOffset;
                     long bytesSinceEmit = 0;
 
-                    while (writePos <= segment.EndByte)
+                    while (true)
                     {
-                        var maxRead = (int)Math.Min(buffer.Length, segment.EndByte - writePos + 1L);
+                        // EndByte can shrink while we run (work-stealing): read it once per iteration.
+                        var end = segment.EndByte;
+                        if (writePos > end) break;
+                        var maxRead = (int)Math.Min(buffer.Length, end - writePos + 1L);
                         var read = await stream.ReadAsync(buffer.AsMemory(0, maxRead), ct).ConfigureAwait(false);
                         if (read == 0) break;
 
@@ -221,9 +245,9 @@ public sealed class RynDownloadEngine : IDisposable
                 throw new HttpRequestException($"Unexpected HTTP {(int)resp.StatusCode}");
             }
             catch (OperationCanceledException) { throw; }
-            catch (UnauthorizedAccessException)
+            catch (Exception ex) when (ex is UnauthorizedAccessException or FileNotFoundException)
             {
-                segment.Status = "FAILED";
+                segment.Status = "FAILED"; // fatal (401/403/404/410/file changed): retrying cannot help
                 throw;
             }
             catch
@@ -274,6 +298,55 @@ public sealed class RynDownloadEngine : IDisposable
             list.Add(new ActiveSegment($"{downloadId}_seg_{i}", i, start, end));
         }
         return list;
+    }
+
+    /// <summary>
+    /// Atomically reserves "name.ryntmp" and returns the matching final path ("name", "name (1)", ...),
+    /// so an existing user file or a parallel download is never overwritten.
+    /// </summary>
+    private static string ClaimUniqueTarget(string directory, string fileName)
+    {
+        var first = UrlAndPathValidator.ResolveSafeTargetPath(directory, fileName);
+        var stem = Path.GetFileNameWithoutExtension(first);
+        var ext = Path.GetExtension(first);
+        var candidate = first;
+        for (var i = 1; i <= 9_999; i++)
+        {
+            if (!File.Exists(candidate))
+            {
+                try
+                {
+                    using var tempClaim = new FileStream(candidate + DownloadPolicy.SparseTempExtension, FileMode.CreateNew, FileAccess.Write, FileShare.None);
+                    return candidate;
+                }
+                catch (IOException)
+                {
+                    // temp name already taken by a parallel download: try the next suffix
+                }
+            }
+            candidate = UrlAndPathValidator.ResolveSafeTargetPath(directory, $"{stem} ({i}){ext}");
+        }
+        throw new IOException($"TOO_MANY_DUPLICATE_FILE_NAMES: {fileName}");
+    }
+
+    private static async ValueTask<Stream> SsrfSafeConnectAsync(SocketsHttpConnectionContext context, CancellationToken ct)
+    {
+        var addresses = await Dns.GetHostAddressesAsync(context.DnsEndPoint.Host, ct).ConfigureAwait(false);
+        var allowed = addresses.Where(a => !UrlAndPathValidator.IsBlockedAddress(a)).ToArray();
+        if (allowed.Length == 0)
+            throw new UnauthorizedAccessException("SSRF_BLOCKED: Private or loopback target blocked.");
+
+        var socket = new Socket(SocketType.Stream, ProtocolType.Tcp) { NoDelay = true };
+        try
+        {
+            await socket.ConnectAsync(allowed, context.DnsEndPoint.Port, ct).ConfigureAwait(false);
+            return new NetworkStream(socket, ownsSocket: true);
+        }
+        catch
+        {
+            socket.Dispose();
+            throw;
+        }
     }
 
     private static void CheckFatalStatus(HttpStatusCode code)

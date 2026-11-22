@@ -484,6 +484,10 @@ components:
           type: string
         provider_used:
           type: string
+          description: Provider that actually produced the reply (LOCAL_RULES until external providers are integrated).
+        requested_provider:
+          type: string
+          description: Provider the client asked for (AUTO if unavailable).
         proposed_tools:
           type: array
           items:

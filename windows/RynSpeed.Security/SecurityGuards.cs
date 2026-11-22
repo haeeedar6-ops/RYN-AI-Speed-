@@ -37,7 +37,7 @@ public static partial class UrlAndPathValidator
             var addresses = await Dns.GetHostAddressesAsync(uri.Host, ct).ConfigureAwait(false);
             foreach (var ip in addresses)
             {
-                if (IsPrivateOrLoopback(ip))
+                if (IsBlockedAddress(ip))
                 {
                     throw new UnauthorizedAccessException("SSRF_BLOCKED: Private or loopback target blocked.");
                 }
@@ -46,23 +46,32 @@ public static partial class UrlAndPathValidator
         return uri;
     }
 
-    private static bool IsPrivateOrLoopback(IPAddress ip)
+    /// <summary>
+    /// True for loopback, link-local, private (RFC1918), CGNAT, reserved/multicast and IPv6 unique-local addresses.
+    /// Public so the HTTP connect callback can re-check the address that is ACTUALLY connected to.
+    /// </summary>
+    public static bool IsBlockedAddress(IPAddress ip)
     {
-        if (IPAddress.IsLoopback(ip) || ip.IsIPv6LinkLocal || ip.IsIPv6SiteLocal || ip.IsIPv6Multicast)
+        if (ip.AddressFamily == AddressFamily.InterNetworkV6 && ip.IsIPv4MappedToIPv6)
+            ip = ip.MapToIPv4();
+
+        if (IPAddress.IsLoopback(ip) || ip.IsIPv6LinkLocal || ip.IsIPv6SiteLocal ||
+            ip.IsIPv6Multicast || ip.IsIPv6UniqueLocal || ip.Equals(IPAddress.IPv6Any))
             return true;
 
-        var bytes = ip.AddressFamily == AddressFamily.InterNetworkV6 && ip.IsIPv4MappedToIPv6
-            ? ip.MapToIPv4().GetAddressBytes()
-            : ip.GetAddressBytes();
-
+        var bytes = ip.GetAddressBytes();
         if (bytes.Length == 4)
         {
             return bytes[0] == 10 ||
                    bytes[0] == 127 ||
                    bytes[0] == 0 ||
+                   bytes[0] >= 224 ||
+                   (bytes[0] == 100 && bytes[1] >= 64 && bytes[1] <= 127) ||
                    (bytes[0] == 169 && bytes[1] == 254) ||
                    (bytes[0] == 172 && bytes[1] >= 16 && bytes[1] <= 31) ||
-                   (bytes[0] == 192 && bytes[1] == 168);
+                   (bytes[0] == 192 && bytes[1] == 168) ||
+                   (bytes[0] == 192 && bytes[1] == 0 && bytes[2] == 0) ||
+                   (bytes[0] == 198 && (bytes[1] == 18 || bytes[1] == 19));
         }
         return false;
     }
@@ -70,7 +79,7 @@ public static partial class UrlAndPathValidator
     public static string SanitizeFileName(string rawName, string fallback = "download.bin")
     {
         var leaf = rawName.Replace('\\', '/').Split('/').LastOrDefault() ?? string.Empty;
-        var cleaned = InvalidCharsRegex().Replace(ControlAndBiDiRegex().Replace(leaf, ""), "_").Trim().TrimStart('.');
+        var cleaned = InvalidCharsRegex().Replace(ControlAndBiDiRegex().Replace(leaf, ""), "_").Trim().TrimStart('.').TrimEnd('.', ' ');
         if (string.IsNullOrWhiteSpace(cleaned))
             return fallback;
 

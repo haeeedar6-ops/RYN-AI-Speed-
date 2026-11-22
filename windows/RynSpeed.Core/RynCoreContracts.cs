@@ -22,7 +22,7 @@ public static class FaultIsolation
             var result = await operation(cancellationToken).ConfigureAwait(false);
             return RynResult<T>.Ok(result);
         }
-        catch (OperationCanceledException)
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
             throw;
         }
