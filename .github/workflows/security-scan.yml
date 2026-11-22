@@ -1,4 +1,4 @@
-name: Security — Secret Scanning (Gitleaks)
+name: Security — Secret Scanning & Automated Security Audit
 
 on:
   push:
@@ -20,3 +20,15 @@ jobs:
       - uses: gitleaks/gitleaks-action@v2
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  security-audit-suite:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install Cryptography
+        run: pip install cryptography
+      - name: Run Full Security & Privacy Audit Suite
+        run: python -m unittest tests/security/test_security_audit.py -v
