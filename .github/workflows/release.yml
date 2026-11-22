@@ -49,16 +49,17 @@ jobs:
             echo "$ANDROID_KEYSTORE_BASE64" | base64 --decode > app/release.keystore
             echo "Release keystore decoded."
           else
-            echo "ANDROID_KEYSTORE_BASE64 secret not set; building unsigned release APK."
+            echo "ANDROID_KEYSTORE_BASE64 not set; building installable Debug APK alongside Release APK."
           fi
-      - name: Build Android Release APK
-        run: gradle assembleRelease --stacktrace
-      - name: Generate SHA-256 Checksum
-        run: sha256sum app/build/outputs/apk/release/*.apk > ../android-sha256.txt || true
+      - name: Build Android Installable APK (Debug + Release)
+        run: gradle assembleDebug assembleRelease --stacktrace
+      - name: Generate SHA-256 Checksums
+        run: sha256sum app/build/outputs/apk/debug/*.apk app/build/outputs/apk/release/*.apk > ../android-sha256.txt || true
       - uses: actions/upload-artifact@v4
         with:
           name: android-release
           path: |
+            android/app/build/outputs/apk/debug/*.apk
             android/app/build/outputs/apk/release/*.apk
             android-sha256.txt
 
