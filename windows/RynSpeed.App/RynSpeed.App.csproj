@@ -15,6 +15,7 @@
     <ProjectReference Include="..\RynSpeed.Security\RynSpeed.Security.csproj" />
     <ProjectReference Include="..\RynSpeed.Database\RynSpeed.Database.csproj" />
     <ProjectReference Include="..\RynSpeed.Downloads\RynSpeed.Downloads.csproj" />
+    <ProjectReference Include="..\RynSpeed.Browser\RynSpeed.Browser.csproj" />
     <PackageReference Include="Microsoft.WindowsAppSDK" />
     <PackageReference Include="Microsoft.Extensions.DependencyInjection" />
   </ItemGroup>

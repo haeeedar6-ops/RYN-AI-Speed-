@@ -43,6 +43,7 @@ dependencies {
     implementation(project(":core:security"))
     implementation(project(":core:database"))
     implementation(project(":feature:downloads"))
+    implementation(project(":feature:browser"))
 
     implementation(libs.androidx.core.ktx)
     implementation(libs.androidx.activity.compose)
