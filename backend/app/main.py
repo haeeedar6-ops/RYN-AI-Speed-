@@ -1,4 +1,4 @@
-"""RYN-AI-Speed Backend (Phase P6) — Auth, Signed VPN Server Registry, Rate Limiting & Config."""
+"""RYN-AI-Speed Backend (Phase P8) — Full Auth, Signed VPN Registry, AI Router, Tool Sandbox & Config."""
 
 from __future__ import annotations
 
@@ -11,6 +11,7 @@ from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request, Res
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
+from app.ai.router_service import AiToolAuthorizer, MultiProviderAiRouter
 from app.auth.service import AuthError, AuthService
 from app.core.config import get_settings
 from app.core.logging import configure_logging
@@ -29,6 +30,8 @@ auth_service = AuthService(
     refresh_ttl_days=settings.refresh_token_ttl_days,
 )
 server_registry = VpnServerRegistry(signer=signer)
+ai_router = MultiProviderAiRouter(settings.ai_providers_enabled)
+ai_authorizer = AiToolAuthorizer()
 rate_limiter = SlidingWindowRateLimiter()
 idempotency_guard = IdempotencyGuard()
 
@@ -89,20 +92,15 @@ def require_rate_limit(route_group: str, limit: int, window_sec: int = 60) -> An
         response.headers["X-RateLimit-Limit"] = str(limit)
         response.headers["X-RateLimit-Remaining"] = str(remaining)
         if not allowed:
-            raise HTTPException(
-                status_code=429,
-                detail="Rate limit exceeded",
-                headers={"Retry-After": str(retry_after)},
-            )
+            raise HTTPException(status_code=429, detail="Rate limit exceeded", headers={"Retry-After": str(retry_after)})
     return _dep
 
 
 def get_current_claims(authorization: str = Header(...)) -> dict[str, Any]:
     if not authorization.startswith("Bearer "):
         raise AuthError("MISSING_BEARER_TOKEN", "Bearer token required.", 401)
-    token = authorization[7:].strip()
     try:
-        return signer.verify_jwt(token)
+        return signer.verify_jwt(authorization[7:].strip())
     except Exception as exc:
         raise AuthError("INVALID_ACCESS_TOKEN", "Access token is invalid or expired.", 401) from exc
 
@@ -130,16 +128,31 @@ class RefreshPayload(BaseModel):
     device_uuid: str = Field(..., min_length=8, max_length=64)
 
 
+class AiChatPayload(BaseModel):
+    session_id: str = Field(..., min_length=8, max_length=64)
+    message: str = Field(..., min_length=1, max_length=4000)
+    language: str = Field(default="ar", pattern="^(ar|en)$")
+    preferred_provider: str = Field(default="AUTO")
+    sanitized_context: dict[str, Any] | None = None
+
+
+class AiActionPayload(BaseModel):
+    tool_name: str = Field(..., min_length=2, max_length=64)
+    arguments: dict[str, Any] = Field(default_factory=dict)
+    user_confirmation_nonce: str | None = None
+
+
+class ConfirmNoncePayload(BaseModel):
+    tool_name: str = Field(..., min_length=2, max_length=64)
+
+
 @app.get("/health", tags=["system"])
 async def health_check() -> dict[str, str]:
     return {"status": "ok", "version": settings.app_version, "env": settings.app_env}
 
 
 @app.post("/api/v1/auth/register", status_code=201, tags=["auth"], dependencies=[Depends(require_rate_limit("auth_reg", 5, 60))])
-async def register_user(
-    payload: RegisterPayload,
-    idempotency_key: str = Header(..., alias="Idempotency-Key"),
-) -> dict[str, object]:
+async def register_user(payload: RegisterPayload, idempotency_key: str = Header(..., alias="Idempotency-Key")) -> dict[str, object]:
     if not idempotency_guard.claim(f"reg:{idempotency_key}"):
         raise AuthError("DUPLICATE_REQUEST", "Duplicate Idempotency-Key replay blocked.", 409)
     return auth_service.register(payload.email, payload.password, payload.device_uuid, payload.display_name)
@@ -179,15 +192,49 @@ async def get_servers_health(_claims: dict[str, Any] = Depends(get_current_claim
 
 
 @app.get("/api/v1/servers/{server_id}", tags=["vpn"])
-async def get_vpn_server_by_id(
-    server_id: str,
-    request: Request,
-    _claims: dict[str, Any] = Depends(get_current_claims),
-) -> Any:
+async def get_vpn_server_by_id(server_id: str, request: Request, _claims: dict[str, Any] = Depends(get_current_claims)) -> Any:
     rec = server_registry.get_server(server_id)
     if rec is None:
         return _problem(404, "SERVER_NOT_FOUND", "Not Found", f"Server '{server_id}' not found.", request.state.request_id)
     return asdict(rec)
+
+
+@app.post("/api/v1/ai/chat", tags=["ai"], dependencies=[Depends(require_rate_limit("ai_chat", 30, 60))])
+async def ai_chat(payload: AiChatPayload, _claims: dict[str, Any] = Depends(get_current_claims)) -> dict[str, Any]:
+    return ai_router.route_chat(
+        message=payload.message,
+        language=payload.language,
+        preferred_provider=payload.preferred_provider,
+        sanitized_context=payload.sanitized_context,
+    )
+
+
+@app.post("/api/v1/ai/confirm-nonce", tags=["ai"], dependencies=[Depends(require_rate_limit("ai_nonce", 20, 60))])
+async def create_confirmation_nonce(payload: ConfirmNoncePayload, claims: dict[str, Any] = Depends(get_current_claims)) -> dict[str, str]:
+    try:
+        nonce = ai_authorizer.issue_confirmation_nonce(str(claims["sub"]), payload.tool_name)
+    except PermissionError as exc:
+        raise AuthError("TOOL_NOT_ALLOWED", str(exc), 403) from exc
+    return {"user_confirmation_nonce": nonce, "tool_name": payload.tool_name}
+
+
+@app.post("/api/v1/ai/action", tags=["ai"], dependencies=[Depends(require_rate_limit("ai_action", 30, 60))])
+async def authorize_ai_action(
+    payload: AiActionPayload,
+    idempotency_key: str = Header(..., alias="Idempotency-Key"),
+    claims: dict[str, Any] = Depends(get_current_claims),
+) -> dict[str, Any]:
+    if not idempotency_guard.claim(f"ai_act:{idempotency_key}"):
+        raise AuthError("DUPLICATE_REQUEST", "Duplicate Idempotency-Key replay blocked.", 409)
+    res = ai_authorizer.authorize(
+        user_id=str(claims["sub"]),
+        tool_name=payload.tool_name,
+        arguments=payload.arguments,
+        confirmation_nonce=payload.user_confirmation_nonce,
+    )
+    if not res["authorized"]:
+        raise AuthError(str(res["reason"]), f"AI action denied: {res['reason']}", 403)
+    return res
 
 
 @app.get("/api/v1/config", tags=["config"])
@@ -198,6 +245,7 @@ async def get_app_config(_claims: dict[str, Any] = Depends(get_current_claims)) 
             "download_engine_v2": True,
             "vpn_kill_switch_enforced": True,
             "ai_local_rules_enabled": True,
+            "ai_auto_manager_enabled": True,
         },
         "ai_providers_enabled": settings.ai_providers_enabled,
     }
