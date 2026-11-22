@@ -2,9 +2,13 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
+import re
 import secrets
 import time
 import uuid
+from collections import deque
 from dataclasses import dataclass
 from typing import Any
 
@@ -26,21 +30,47 @@ ALLOWED_TOOLS: dict[str, dict[str, Any]] = {
 SENSITIVE_CONTEXT_KEYS = frozenset(
     {"private_key", "password", "token", "access_token", "refresh_token", "cookie", "api_key", "secret", "browsing_history"}
 )
+# Any key that CONTAINS one of these fragments (after normalisation) is treated as sensitive,
+# so "accessToken", "Authorization", "wg-private-key" or "apiKey" can no longer slip through.
+_SENSITIVE_FRAGMENTS = (
+    "privatekey", "password", "passwd", "token", "cookie", "apikey", "secret",
+    "authorization", "browsinghistory", "credential", "presharedkey",
+)
+_MAX_CONTEXT_DEPTH = 8
+
+
+def _is_sensitive_key(key: str) -> bool:
+    if key.lower() in SENSITIVE_CONTEXT_KEYS:
+        return True
+    normalized = re.sub(r"[^a-z0-9]", "", key.lower())
+    return any(fragment in normalized for fragment in _SENSITIVE_FRAGMENTS)
+
+
+def _sanitize_value(value: Any, depth: int) -> Any:
+    if depth > _MAX_CONTEXT_DEPTH:
+        return None
+    if isinstance(value, dict):
+        return {
+            k: _sanitize_value(v, depth + 1)
+            for k, v in value.items()
+            if isinstance(k, str) and not _is_sensitive_key(k)
+        }
+    if isinstance(value, list | tuple):
+        return [_sanitize_value(v, depth + 1) for v in value]
+    return value
 
 
 def sanitize_ai_context(context: dict[str, Any] | None) -> dict[str, Any]:
-    """Strip any secrets, private keys, tokens, or browsing history before routing to AI providers."""
+    """Strip secrets, private keys, tokens, or browsing history (recursively, incl. lists)."""
     if not context:
         return {}
-    cleaned: dict[str, Any] = {}
-    for k, v in context.items():
-        if k.lower() in SENSITIVE_CONTEXT_KEYS:
-            continue
-        if isinstance(v, dict):
-            cleaned[k] = sanitize_ai_context(v)
-        else:
-            cleaned[k] = v
-    return cleaned
+    cleaned = _sanitize_value(context, 0)
+    return cleaned if isinstance(cleaned, dict) else {}
+
+
+def _args_digest(arguments: dict[str, Any]) -> str:
+    canonical = json.dumps(arguments, sort_keys=True, separators=(",", ":"), default=str)
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
 @dataclass
@@ -49,6 +79,7 @@ class ConfirmationNonceRecord:
     tool_name: str
     expires_at: float
     used: bool = False
+    args_digest: str | None = None  # when set, the nonce is only valid for exactly these arguments
 
 
 class AiToolAuthorizer:
@@ -56,16 +87,31 @@ class AiToolAuthorizer:
 
     def __init__(self) -> None:
         self._nonces: dict[str, ConfirmationNonceRecord] = {}
-        self.audit_log: list[dict[str, Any]] = []
+        self.audit_log: deque[dict[str, Any]] = deque(maxlen=10_000)
 
-    def issue_confirmation_nonce(self, user_id: str, tool_name: str, ttl_seconds: int = 120) -> str:
+    def _purge_nonces(self) -> None:
+        now = time.monotonic()
+        for k in [k for k, r in self._nonces.items() if r.used or r.expires_at < now]:
+            del self._nonces[k]
+
+    def issue_confirmation_nonce(
+        self,
+        user_id: str,
+        tool_name: str,
+        ttl_seconds: int = 120,
+        arguments: dict[str, Any] | None = None,
+    ) -> str:
         if tool_name not in ALLOWED_TOOLS:
             raise PermissionError(f"TOOL_NOT_ALLOWED: '{tool_name}' is not in the approved registry.")
+        self._purge_nonces()
+        if len(self._nonces) >= 50_000:
+            raise PermissionError("TOO_MANY_PENDING_CONFIRMATIONS")
         nonce = secrets.token_urlsafe(24)
         self._nonces[nonce] = ConfirmationNonceRecord(
             user_id=user_id,
             tool_name=tool_name,
             expires_at=time.monotonic() + ttl_seconds,
+            args_digest=_args_digest(arguments) if arguments is not None else None,
         )
         return nonce
 
@@ -100,6 +146,7 @@ class AiToolAuthorizer:
                 or rec.user_id != user_id
                 or rec.tool_name != tool_name
                 or rec.expires_at < time.monotonic()
+                or (rec.args_digest is not None and rec.args_digest != _args_digest(arguments))
             ):
                 return self._record(audit_id, user_id, tool_name, "DENIED", False, level, "INVALID_OR_REUSED_NONCE")
             rec.used = True
@@ -199,9 +246,12 @@ class MultiProviderAiRouter:
                 else "I am the RYN-AI-Speed Assistant. I can diagnose your network, benchmark DNS, rank VPN servers, or manage downloads."
             )
 
-        provider = preferred_provider if preferred_provider in self._providers else self._providers[0]
+        # HONESTY RULE (plan: "never create fake functionality"): no external provider is called yet,
+        # every reply above is produced by the deterministic local rules, so we must report exactly that.
+        requested = preferred_provider if preferred_provider in self._providers else "AUTO"
         return {
             "reply": reply,
-            "provider_used": provider,
+            "provider_used": "LOCAL_RULES",
+            "requested_provider": requested,
             "proposed_tools": proposals,
         }

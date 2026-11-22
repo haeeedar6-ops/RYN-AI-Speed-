@@ -17,6 +17,7 @@ class Settings:
             "DATABASE_URL", "postgresql+asyncpg://ryn_user:change_me@localhost:5432/ryn_ai_speed"
         )
     )
+    auth_db_path: str = field(default_factory=lambda: os.getenv("AUTH_DB_PATH", "data/ryn_auth.db"))
     redis_url: str = field(default_factory=lambda: os.getenv("REDIS_URL", "redis://localhost:6379/0"))
     access_token_ttl_seconds: int = field(
         default_factory=lambda: int(os.getenv("ACCESS_TOKEN_TTL_SECONDS", "900"))

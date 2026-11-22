@@ -27,6 +27,7 @@ ksp {
 dependencies {
     implementation(project(":core:common"))
     implementation(project(":core:security"))
+    implementation(libs.kotlinx.coroutines.core)
     implementation(libs.room.runtime)
     implementation(libs.room.ktx)
     ksp(libs.room.compiler)

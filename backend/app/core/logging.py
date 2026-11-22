@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import logging
 import re
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 
 _JWT_PATTERN = re.compile(r"eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+")
@@ -40,13 +40,13 @@ def redact_headers(headers: dict[str, str]) -> dict[str, str]:
 class RedactedJsonFormatter(logging.Formatter):
     def format(self, record: logging.LogRecord) -> str:
         payload: dict[str, Any] = {
-            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "timestamp": datetime.now(UTC).isoformat(),
             "level": record.levelname,
             "logger": record.name,
             "message": redact_text(record.getMessage()),
         }
         if hasattr(record, "request_id"):
-            payload["request_id"] = getattr(record, "request_id")
+            payload["request_id"] = record.request_id
         return json.dumps(payload, ensure_ascii=False)
 
 

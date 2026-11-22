@@ -32,6 +32,7 @@ import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.darkColorScheme
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
@@ -170,9 +171,11 @@ private fun RynMainAppShell(
     var dnsEntries by remember { mutableStateOf<List<DnsBenchmarkEntry>>(emptyList()) }
     var isTestingNetwork by remember { mutableStateOf(false) }
 
-    if (sharedIncomingUrl != null) {
+    // Side effects must not run during composition (they could fire twice on a retried pass).
+    // scope.launch keeps the download alive when the effect key flips to null after consumption.
+    LaunchedEffect(sharedIncomingUrl) {
+        val urlToStart = sharedIncomingUrl ?: return@LaunchedEffect
         selectedTab = 1
-        val urlToStart = sharedIncomingUrl
         onConsumeSharedUrl()
         scope.launch {
             statusBanner = "جاري فحص الرابط المشارك..."

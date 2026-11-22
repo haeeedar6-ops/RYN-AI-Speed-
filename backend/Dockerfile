@@ -23,6 +23,10 @@ COPY app ./app
 COPY alembic.ini .
 COPY migrations ./migrations
 
+RUN mkdir -p /data && chown ryn:ryn /data
+VOLUME ["/data"]
+ENV AUTH_DB_PATH=/data/ryn_auth.db
+
 USER ryn
 EXPOSE 8000
 

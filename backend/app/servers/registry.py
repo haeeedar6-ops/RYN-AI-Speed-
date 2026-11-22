@@ -5,11 +5,14 @@ from __future__ import annotations
 import json
 import re
 from dataclasses import asdict, dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from app.core.security import Ed25519Signer
 
 _WG_PUBKEY_RE = re.compile(r"^[A-Za-z0-9+/]{43}=$")
+_ENDPOINT_RE = re.compile(r"^(?:[A-Za-z0-9.-]{1,253}|\[[0-9A-Fa-f:]+\]):(\d{1,5})$")
+_COUNTRY_RE = re.compile(r"^[A-Z]{2}$")
+_SERVER_TYPES = frozenset({"PRIVATE", "COMMUNITY"})
 
 
 @dataclass
@@ -45,6 +48,13 @@ class VpnServerRegistry:
             raise ValueError("Invalid WireGuard public key format.")
         if record.protocol != "wireguard":
             raise ValueError("Only WireGuard protocol is permitted.")
+        if record.server_type not in _SERVER_TYPES:
+            raise ValueError("server_type must be PRIVATE or COMMUNITY.")
+        endpoint = _ENDPOINT_RE.match(record.endpoint.strip())
+        if endpoint is None or not 1 <= int(endpoint.group(1)) <= 65535:
+            raise ValueError("Invalid endpoint; expected host:port.")
+        if not _COUNTRY_RE.match(record.country.upper()):
+            raise ValueError("Invalid country code.")
         if record.server_type == "COMMUNITY" and (
             not record.operator_verified or not record.no_logs_verified
         ):
@@ -68,7 +78,7 @@ class VpnServerRegistry:
         rec.latency_ms = latency_ms
         rec.packet_loss_pct = packet_loss_pct
         rec.capacity_status = capacity_status
-        rec.last_checked = datetime.now(timezone.utc).isoformat()
+        rec.last_checked = datetime.now(UTC).isoformat()
         return rec
 
     def get_server(self, server_id: str) -> VpnServerRecord | None:
@@ -85,7 +95,7 @@ class VpnServerRegistry:
 
         payload: dict[str, object] = {
             "servers": [asdict(s) for s in sorted(items, key=lambda x: x.server_id)],
-            "generated_at": datetime.now(timezone.utc).isoformat(),
+            "generated_at": datetime.now(UTC).isoformat(),
         }
         canonical = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
         signature = self._signer.sign_manifest(canonical)
@@ -104,5 +114,5 @@ class VpnServerRegistry:
                 }
                 for s in self._servers.values()
             ],
-            "checked_at": datetime.now(timezone.utc).isoformat(),
+            "checked_at": datetime.now(UTC).isoformat(),
         }

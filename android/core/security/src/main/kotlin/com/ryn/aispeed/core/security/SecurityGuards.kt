@@ -16,30 +16,60 @@ object UrlAndPathValidator {
     )
     private val BIDI_AND_CONTROL = Regex("[\\u0000-\\u001F\\u007F\\u202A-\\u202E\\u2066-\\u2069]")
 
-    fun validateDownloadUrl(rawUrl: String, allowLocalNetwork: Boolean = false): URI {
+    /**
+     * Syntax-only validation (scheme + host). Performs NO network/DNS access, so it is safe to call
+     * on the main thread (e.g. when a link is shared into the app).
+     */
+    fun validateUrlSyntax(rawUrl: String): URI {
         val uri = URI(rawUrl.trim())
         val scheme = uri.scheme?.lowercase()
             ?: throw SecurityException("INVALID_URL_SCHEME: Missing URL scheme")
-        require(scheme in ALLOWED_SCHEMES) {
-            "INVALID_URL_SCHEME: Only HTTP/HTTPS URLs are permitted"
+        if (scheme !in ALLOWED_SCHEMES) {
+            throw SecurityException("INVALID_URL_SCHEME: Only HTTP/HTTPS URLs are permitted")
         }
-        val host = uri.host?.takeIf { it.isNotBlank() }
+        uri.host?.takeIf { it.isNotBlank() }
             ?: throw SecurityException("INVALID_URL_SCHEME: Missing host")
+        return uri
+    }
 
+    /** Full validation incl. DNS/SSRF check. Blocking: call only from a background thread. */
+    fun validateDownloadUrl(rawUrl: String, allowLocalNetwork: Boolean = false): URI {
+        val uri = validateUrlSyntax(rawUrl)
         if (!allowLocalNetwork) {
-            val addresses = InetAddress.getAllByName(host)
-            for (addr in addresses) {
-                if (addr.isAnyLocalAddress ||
-                    addr.isLoopbackAddress ||
-                    addr.isLinkLocalAddress ||
-                    addr.isSiteLocalAddress ||
-                    addr.isMulticastAddress
-                ) {
+            for (addr in InetAddress.getAllByName(uri.host)) {
+                if (isBlockedAddress(addr)) {
                     throw SecurityException("SSRF_BLOCKED: Private or loopback target blocked")
                 }
             }
         }
         return uri
+    }
+
+    /** True for loopback, link-local, private (RFC1918), CGNAT, reserved, multicast and IPv6 ULA addresses. */
+    fun isBlockedAddress(addr: InetAddress): Boolean {
+        if (addr.isAnyLocalAddress ||
+            addr.isLoopbackAddress ||
+            addr.isLinkLocalAddress ||
+            addr.isSiteLocalAddress ||
+            addr.isMulticastAddress
+        ) {
+            return true
+        }
+        val b = addr.address
+        return when (b.size) {
+            4 -> {
+                val o0 = b[0].toInt() and 0xFF
+                val o1 = b[1].toInt() and 0xFF
+                val o2 = b[2].toInt() and 0xFF
+                o0 == 0 ||
+                    (o0 == 100 && o1 in 64..127) ||
+                    (o0 == 192 && o1 == 0 && o2 == 0) ||
+                    (o0 == 198 && (o1 == 18 || o1 == 19)) ||
+                    o0 >= 240
+            }
+            16 -> (b[0].toInt() and 0xFE) == 0xFC
+            else -> true
+        }
     }
 
     fun sanitizeFileName(rawName: String, fallback: String = "download.bin"): String {

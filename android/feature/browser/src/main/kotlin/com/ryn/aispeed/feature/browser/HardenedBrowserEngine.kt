@@ -181,8 +181,8 @@ object ExternalLinkExtractor {
     fun extractFirstSafeUrl(sharedText: String?): String? {
         if (sharedText.isNullOrBlank()) return null
         val candidate = URL_REGEX.find(sharedText)?.value ?: return null
-        return runCatching {
-            UrlAndPathValidator.validateDownloadUrl(candidate, allowLocalNetwork = false).toString()
-        }.getOrNull()
+        // Syntax-only on purpose: this runs on the main thread, where a DNS lookup would crash with
+        // NetworkOnMainThreadException. The SSRF/DNS check happens later inside RynDownloadEngine (IO thread).
+        return runCatching { UrlAndPathValidator.validateUrlSyntax(candidate).toString() }.getOrNull()
     }
 }

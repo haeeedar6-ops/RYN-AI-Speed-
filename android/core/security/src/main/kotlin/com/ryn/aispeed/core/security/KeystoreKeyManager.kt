@@ -30,10 +30,13 @@ class KeystoreKeyManager(private val context: Context) {
 
         val rawPassphrase = ByteArray(32).also { SecureRandom().nextBytes(it) }
         val (cipherText, iv) = encrypt(rawPassphrase)
-        prefs.edit()
+        // commit() (synchronous) on purpose: if the process died before an async apply() reached disk,
+        // the database would be created with a passphrase that is lost forever.
+        val saved = prefs.edit()
             .putString(KEY_DB_BLOB, Base64.encodeToString(cipherText, Base64.NO_WRAP))
             .putString(KEY_DB_IV, Base64.encodeToString(iv, Base64.NO_WRAP))
-            .apply()
+            .commit()
+        check(saved) { "Failed to persist the sealed database passphrase" }
         return rawPassphrase
     }
 

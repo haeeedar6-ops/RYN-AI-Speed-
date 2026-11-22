@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import os
 import uuid
 from dataclasses import asdict
@@ -17,14 +18,22 @@ from app.core.config import get_settings
 from app.core.logging import configure_logging
 from app.core.rate_limit import IdempotencyGuard, SlidingWindowRateLimiter
 from app.core.security import Ed25519Signer
+from app.core.store import AuthStore
 from app.servers.registry import VpnServerRegistry
 
 settings = get_settings()
 configure_logging(settings.log_level)
 
+logger = logging.getLogger("ryn.backend")
+
 _pem = os.getenv("JWT_PRIVATE_KEY_PEM", "").strip()
+if not _pem and settings.app_env == "production":
+    # An ephemeral key would invalidate every session on each restart and break signed manifests.
+    raise RuntimeError("JWT_PRIVATE_KEY_PEM is required when APP_ENV=production.")
 signer = Ed25519Signer.from_pem(_pem) if _pem else Ed25519Signer()
+auth_store = AuthStore(settings.auth_db_path)
 auth_service = AuthService(
+    store=auth_store,
     signer=signer,
     access_ttl_sec=settings.access_token_ttl_seconds,
     refresh_ttl_days=settings.refresh_token_ttl_days,
@@ -80,6 +89,7 @@ async def auth_error_handler(request: Request, exc: AuthError) -> JSONResponse:
 @app.exception_handler(Exception)
 async def problem_details_exception_handler(request: Request, exc: Exception) -> JSONResponse:
     request_id = getattr(request.state, "request_id", str(uuid.uuid4()))
+    logger.error("Unhandled %s on %s %s", type(exc).__name__, request.method, request.url.path, extra={"request_id": request_id})
     return _problem(500, "INTERNAL_SERVER_ERROR", "Internal Server Error", "An unexpected error occurred.", request_id)
 
 
@@ -96,8 +106,8 @@ def require_rate_limit(route_group: str, limit: int, window_sec: int = 60) -> An
     return _dep
 
 
-def get_current_claims(authorization: str = Header(...)) -> dict[str, Any]:
-    if not authorization.startswith("Bearer "):
+def get_current_claims(authorization: str | None = Header(default=None)) -> dict[str, Any]:
+    if not authorization or not authorization.startswith("Bearer "):
         raise AuthError("MISSING_BEARER_TOKEN", "Bearer token required.", 401)
     try:
         return signer.verify_jwt(authorization[7:].strip())
@@ -105,8 +115,11 @@ def get_current_claims(authorization: str = Header(...)) -> dict[str, Any]:
         raise AuthError("INVALID_ACCESS_TOKEN", "Access token is invalid or expired.", 401) from exc
 
 
+_EMAIL_PATTERN = r"^[^@\s]+@[^@\s]+\.[^@\s]+$"
+
+
 class RegisterPayload(BaseModel):
-    email: str = Field(..., min_length=5, max_length=254)
+    email: str = Field(..., min_length=5, max_length=254, pattern=_EMAIL_PATTERN)
     password: str = Field(..., min_length=12, max_length=128)
     display_name: str | None = Field(default=None, max_length=80)
     device_uuid: str = Field(..., min_length=8, max_length=64)
@@ -116,7 +129,7 @@ class RegisterPayload(BaseModel):
 
 
 class LoginPayload(BaseModel):
-    email: str = Field(..., min_length=5, max_length=254)
+    email: str = Field(..., min_length=5, max_length=254, pattern=_EMAIL_PATTERN)
     password: str = Field(..., min_length=1, max_length=128)
     device_uuid: str = Field(..., min_length=8, max_length=64)
     platform: str = Field(..., pattern="^(ANDROID|WINDOWS)$")
@@ -132,7 +145,7 @@ class AiChatPayload(BaseModel):
     session_id: str = Field(..., min_length=8, max_length=64)
     message: str = Field(..., min_length=1, max_length=4000)
     language: str = Field(default="ar", pattern="^(ar|en)$")
-    preferred_provider: str = Field(default="AUTO")
+    preferred_provider: str = Field(default="AUTO", pattern="^(AUTO|LOCAL_RULES|OPENAI|GEMINI|ANTHROPIC)$")
     sanitized_context: dict[str, Any] | None = None
 
 
@@ -144,6 +157,8 @@ class AiActionPayload(BaseModel):
 
 class ConfirmNoncePayload(BaseModel):
     tool_name: str = Field(..., min_length=2, max_length=64)
+    # Optional: when provided, the nonce is bound to exactly these arguments (e.g. one server_id).
+    arguments: dict[str, Any] | None = None
 
 
 @app.get("/health", tags=["system"])
@@ -212,7 +227,9 @@ async def ai_chat(payload: AiChatPayload, _claims: dict[str, Any] = Depends(get_
 @app.post("/api/v1/ai/confirm-nonce", tags=["ai"], dependencies=[Depends(require_rate_limit("ai_nonce", 20, 60))])
 async def create_confirmation_nonce(payload: ConfirmNoncePayload, claims: dict[str, Any] = Depends(get_current_claims)) -> dict[str, str]:
     try:
-        nonce = ai_authorizer.issue_confirmation_nonce(str(claims["sub"]), payload.tool_name)
+        nonce = ai_authorizer.issue_confirmation_nonce(
+            str(claims["sub"]), payload.tool_name, arguments=payload.arguments
+        )
     except PermissionError as exc:
         raise AuthError("TOOL_NOT_ALLOWED", str(exc), 403) from exc
     return {"user_confirmation_nonce": nonce, "tool_name": payload.tool_name}
@@ -224,7 +241,7 @@ async def authorize_ai_action(
     idempotency_key: str = Header(..., alias="Idempotency-Key"),
     claims: dict[str, Any] = Depends(get_current_claims),
 ) -> dict[str, Any]:
-    if not idempotency_guard.claim(f"ai_act:{idempotency_key}"):
+    if not idempotency_guard.claim(f"ai_act:{claims['sub']}:{idempotency_key}"):
         raise AuthError("DUPLICATE_REQUEST", "Duplicate Idempotency-Key replay blocked.", 409)
     res = ai_authorizer.authorize(
         user_id=str(claims["sub"]),

@@ -47,3 +47,38 @@ class VpnServerScorerTest {
         assertTrue(cfg.contains("DNS = 1.1.1.1, 9.9.9.9"))
     }
 }
+
+class VpnHardeningTest {
+    private val validKey = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
+
+    private fun server(endpoint: String) = VpnServerProfile(
+        "p1", "NL-1", "NL", "EU", endpoint, validKey,
+        serverType = "PRIVATE", operatorVerified = true, noLogsVerified = true,
+        healthStatus = "HEALTHY", capacityStatus = "LOW", pingMs = 20.0, jitterMs = 2.0, packetLossPct = 0.0
+    )
+
+    @Test
+    fun `config builder rejects injected directives`() {
+        val bad = listOf("1.2.3.4:51820\nPostUp = evil", "1.2.3.4", "host:0", "1.2.3.4:51820 extra")
+        for (endpoint in bad) {
+            try {
+                WireGuardConfigBuilder.buildConfig(validKey, "10.66.66.2/32", server(endpoint))
+                org.junit.Assert.fail("expected rejection of $endpoint")
+            } catch (expected: IllegalArgumentException) {
+                // ok
+            }
+        }
+    }
+
+    @Test
+    fun `connected state is only reachable through route verification`() {
+        val controller = VpnStateController(com.ryn.aispeed.core.common.ModuleEventBus())
+        assertFalse(controller.transitionTo(VpnTunnelState.CONNECTED))
+        assertEquals(VpnTunnelState.DISCONNECTED, controller.state.value)
+        assertTrue(controller.transitionTo(VpnTunnelState.CONNECTING))
+        assertFalse(controller.transitionTo(VpnTunnelState.CONNECTED))
+        assertTrue(controller.transitionTo(VpnTunnelState.VERIFYING_ROUTE))
+        assertTrue(controller.transitionTo(VpnTunnelState.CONNECTED))
+        assertEquals(VpnTunnelState.CONNECTED, controller.state.value)
+    }
+}

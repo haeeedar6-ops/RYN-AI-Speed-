@@ -64,16 +64,23 @@ def hash_password(password: str) -> str:
 def verify_password(password: str, stored_hash: str) -> bool:
     if stored_hash.startswith("$argon2") and _ARGON2 is not None:
         try:
-            return _ARGON2.verify(stored_hash, password)
+            return bool(_ARGON2.verify(stored_hash, password))
         except VerifyMismatchError:
+            return False
+        except Exception:  # corrupted/unsupported hash must fail closed, never crash
             return False
     if stored_hash.startswith("pbkdf2_sha512$"):
         parts = stored_hash.split("$")
         if len(parts) != 4:
             return False
-        iterations = int(parts[1])
-        salt = _b64url_decode(parts[2])
-        expected = _b64url_decode(parts[3])
+        try:
+            iterations = int(parts[1])
+            if not 100_000 <= iterations <= 5_000_000:
+                return False
+            salt = _b64url_decode(parts[2])
+            expected = _b64url_decode(parts[3])
+        except ValueError:
+            return False
         actual = hashlib.pbkdf2_hmac("sha512", password.encode("utf-8"), salt, iterations)
         return hmac.compare_digest(actual, expected)
     return False
@@ -118,12 +125,17 @@ class Ed25519Signer:
         parts = token.split(".")
         if len(parts) != 3:
             raise ValueError("Malformed JWT")
+        header = json.loads(_b64url_decode(parts[0]).decode("utf-8"))
+        if not isinstance(header, dict) or header.get("alg") != "EdDSA":
+            raise ValueError("Unsupported JWT algorithm")
         signing_input = f"{parts[0]}.{parts[1]}".encode("ascii")
         sig = _b64url_decode(parts[2])
         self._public.verify(sig, signing_input)
         payload: dict[str, Any] = json.loads(_b64url_decode(parts[1]).decode("utf-8"))
         if int(payload.get("exp", 0)) < int(time.time()):
             raise ValueError("JWT expired")
+        if not payload.get("sub") or not payload.get("dev"):
+            raise ValueError("JWT missing required claims")
         return payload
 
     def sign_manifest(self, canonical_payload: bytes) -> str:

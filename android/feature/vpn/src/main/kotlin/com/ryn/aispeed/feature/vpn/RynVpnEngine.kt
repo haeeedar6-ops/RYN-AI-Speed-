@@ -88,6 +88,12 @@ object VpnServerScorer {
  * Private keys stay strictly on-device and are NEVER logged or transmitted to Backend/AI.
  */
 object WireGuardConfigBuilder {
+    // Strict allow-lists: values are interpolated into a config file, so any CR/LF or extra token
+    // could inject additional directives (config injection).
+    private val ENDPOINT_REGEX = Regex("^(?:[A-Za-z0-9.-]{1,253}|\\[[0-9A-Fa-f:]+\\]):(?:[1-9][0-9]{0,4})$")
+    private val ADDRESS_REGEX = Regex("^[0-9A-Fa-f:.]{2,45}/[0-9]{1,3}$")
+    private val DNS_REGEX = Regex("^[0-9A-Fa-f:.]{2,45}$")
+
     fun buildConfig(
         clientPrivateKeyBase64: String,
         clientAddressCidr: String,
@@ -96,7 +102,9 @@ object WireGuardConfigBuilder {
     ): String {
         require(VpnServerScorer.isValidWireGuardKey(clientPrivateKeyBase64)) { "Invalid client WireGuard private key" }
         require(VpnServerScorer.isValidWireGuardKey(server.publicKey)) { "Invalid server WireGuard public key" }
-        require(server.endpoint.contains(':')) { "Invalid server endpoint format (host:port required)" }
+        require(ENDPOINT_REGEX.matches(server.endpoint)) { "Invalid server endpoint format (host:port required)" }
+        require(ADDRESS_REGEX.matches(clientAddressCidr)) { "Invalid client address (CIDR required)" }
+        require(dnsResolvers.isNotEmpty() && dnsResolvers.all { DNS_REGEX.matches(it) }) { "Invalid DNS resolver" }
 
         return buildString {
             appendLine("[Interface]")
@@ -115,11 +123,21 @@ object WireGuardConfigBuilder {
 }
 
 /**
- * Hardened Android VpnService with OS-level Kill Switch (`setBlocking(true)`),
- * DNS Leak Protection, and IPv6 blackhole route (`::/0`).
+ * Android VpnService shell (DNS + IPv6 leak protection routes).
+ *
+ * IMPORTANT / HONESTY: this class only builds the TUN interface. Nothing here reads or writes packets
+ * and no WireGuard backend (com.wireguard.android:tunnel) is integrated yet, so an established tunnel
+ * would black-hole ALL device traffic. [establishHardenedTunnel] therefore refuses to run until a real
+ * backend is attached ([backendAttached]). `setBlocking(true)` is NOT a kill switch (it only makes
+ * the TUN file descriptor blocking); the real kill switch is Android's "Always-on VPN + Block
+ * connections without VPN" which is reported by [isOsLockdownKillSwitchActive].
  */
 class RynVpnService : VpnService() {
     private var tunnelInterface: ParcelFileDescriptor? = null
+
+    /** Must be set to true only by the P5 WireGuard backend integration once it services the TUN fd. */
+    @Volatile
+    var backendAttached: Boolean = false
 
     fun establishHardenedTunnel(
         sessionName: String,
@@ -127,10 +145,13 @@ class RynVpnService : VpnService() {
         dnsServers: List<String> = listOf("1.1.1.1", "9.9.9.9"),
         enforceIpv6Blackhole: Boolean = true
     ): ParcelFileDescriptor? {
+        check(backendAttached) {
+            "WIREGUARD_BACKEND_NOT_INTEGRATED: refusing to route device traffic into an unserviced tunnel"
+        }
         val builder = Builder()
             .setSession(sessionName)
             .setMtu(1280)
-            .setBlocking(true) // OS-level Kill Switch blocking non-tunnel leaks
+            .setBlocking(true) // blocking TUN I/O only; this is NOT a kill switch
             .addAddress(tunnelIpv4Address, 32)
             .addRoute("0.0.0.0", 0)
 
@@ -174,13 +195,33 @@ class VpnStateController(private val eventBus: ModuleEventBus) {
     private val _state = MutableStateFlow(VpnTunnelState.DISCONNECTED)
     val state: StateFlow<VpnTunnelState> = _state.asStateFlow()
 
-    fun transitionTo(newState: VpnTunnelState) {
+    /**
+     * Enforces the only legal state machine. In particular CONNECTED is reachable solely from
+     * VERIFYING_ROUTE, so the UI can never claim "connected" without a real route verification.
+     * Returns false (and changes nothing) for an illegal transition.
+     */
+    fun transitionTo(newState: VpnTunnelState): Boolean {
+        val current = _state.value
+        if (current == newState) return true
+        if (newState !in ALLOWED.getValue(current)) return false
         _state.value = newState
         eventBus.emit(
             ModuleEvent.NetworkStateChanged(
                 online = true,
                 vpnActive = (newState == VpnTunnelState.CONNECTED)
             )
+        )
+        return true
+    }
+
+    private companion object {
+        val ALLOWED: Map<VpnTunnelState, Set<VpnTunnelState>> = mapOf(
+            VpnTunnelState.DISCONNECTED to setOf(VpnTunnelState.CONNECTING),
+            VpnTunnelState.CONNECTING to setOf(VpnTunnelState.VERIFYING_ROUTE, VpnTunnelState.ERROR, VpnTunnelState.DISCONNECTING),
+            VpnTunnelState.VERIFYING_ROUTE to setOf(VpnTunnelState.CONNECTED, VpnTunnelState.ERROR, VpnTunnelState.DISCONNECTING),
+            VpnTunnelState.CONNECTED to setOf(VpnTunnelState.DISCONNECTING, VpnTunnelState.ERROR),
+            VpnTunnelState.DISCONNECTING to setOf(VpnTunnelState.DISCONNECTED, VpnTunnelState.ERROR),
+            VpnTunnelState.ERROR to setOf(VpnTunnelState.DISCONNECTED, VpnTunnelState.CONNECTING)
         )
     }
 }
