@@ -2,23 +2,17 @@
   <PropertyGroup>
     <OutputType>WinExe</OutputType>
     <TargetFramework>net10.0-windows10.0.22621.0</TargetFramework>
-    <TargetPlatformMinVersion>10.0.19041.0</TargetPlatformMinVersion>
     <RootNamespace>RynSpeed.App</RootNamespace>
-    <Platforms>x64;ARM64</Platforms>
-    <RuntimeIdentifiers>win-x64;win-arm64</RuntimeIdentifiers>
-    <UseWinUI>true</UseWinUI>
-    <EnableMsixTooling>true</EnableMsixTooling>
-    <WindowsPackageType>MSIX</WindowsPackageType>
+    <UseWPF>true</UseWPF>
+    <PublishSingleFile>false</PublishSingleFile>
   </PropertyGroup>
   <ItemGroup>
     <ProjectReference Include="..\RynSpeed.Core\RynSpeed.Core.csproj" />
     <ProjectReference Include="..\RynSpeed.Security\RynSpeed.Security.csproj" />
     <ProjectReference Include="..\RynSpeed.Database\RynSpeed.Database.csproj" />
     <ProjectReference Include="..\RynSpeed.Downloads\RynSpeed.Downloads.csproj" />
-    <ProjectReference Include="..\RynSpeed.Browser\RynSpeed.Browser.csproj" />
     <ProjectReference Include="..\RynSpeed.Network\RynSpeed.Network.csproj" />
     <ProjectReference Include="..\RynSpeed.VPN\RynSpeed.VPN.csproj" />
-    <PackageReference Include="Microsoft.WindowsAppSDK" />
-    <PackageReference Include="Microsoft.Extensions.DependencyInjection" />
+    <ProjectReference Include="..\RynSpeed.AI\RynSpeed.AI.csproj" />
   </ItemGroup>
 </Project>
