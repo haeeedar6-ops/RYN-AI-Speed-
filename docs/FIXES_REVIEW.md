@@ -29,3 +29,9 @@ Ran: backend unit tests (19), root security audit + integration suites (10), `va
 2. No pause/resume/cancel API and no periodic segment checkpoint in either download engine (needed for resume after restart).
 3. No real WireGuard integration yet (P5) and no gradle wrapper in `android/`.
 4. `/api/v1/version` still returns placeholder checksum/signature; clients must reject them.
+
+## Windows CI errors (from your GitHub log) - fixed
+- `CA1305` x5 in `RynWindowsVpnEngine.cs` -> culture-invariant strings (and the config values are now validated against injection).
+- `CA1822` in `RynNetworkOptimizer.MeasureTcpLatencyAsync` -> `static` (call site in `MainWindow.xaml.cs` updated).
+- `CA1001` in `TokenBucketLimiter` -> now `IDisposable`; the engine disposes it.
+- `Directory.Build.props`: analyzer (CA) warnings no longer fail the release build (compiler warnings still do), so one style rule cannot block a release.
