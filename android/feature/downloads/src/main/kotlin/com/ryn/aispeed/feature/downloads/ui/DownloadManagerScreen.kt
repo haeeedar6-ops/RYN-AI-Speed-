@@ -91,8 +91,9 @@ private fun DownloadItemCard(
     onPause: (String) -> Unit,
     onResume: (String) -> Unit
 ) {
-    val progress = if (item.fileSize != null && item.fileSize > 0L) {
-        (item.downloadedBytes.toFloat() / item.fileSize.toFloat()).coerceIn(0f, 1f)
+    val totalSize = item.fileSize
+    val progress = if (totalSize != null && totalSize > 0L) {
+        (item.downloadedBytes.toFloat() / totalSize.toFloat()).coerceIn(0f, 1f)
     } else 0f
 
     Card(
