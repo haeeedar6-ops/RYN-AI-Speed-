@@ -58,6 +58,7 @@ class RynDownloadEngine(
             var currentUrl = UrlAndPathValidator.validateDownloadUrl(rawUrl, allowLocalNetwork).toString()
             var hops = 0
             while (hops < 5) {
+                var redirected = false
                 val headReq = Request.Builder().url(currentUrl).head().build()
                 httpClient.newCall(headReq).execute().use { resp ->
                     if (resp.code in setOf(301, 302, 303, 307, 308)) {
@@ -65,16 +66,14 @@ class RynDownloadEngine(
                             ?: throw IllegalStateException("Redirect without Location header")
                         currentUrl = UrlAndPathValidator.validateDownloadUrl(location, allowLocalNetwork).toString()
                         hops++
-                        continue
-                    }
-                    if (resp.code == 401 || resp.code == 403) {
+                        redirected = true
+                    } else if (resp.code == 401 || resp.code == 403) {
                         throw SecurityException("AUTH_OR_EXPIRED_LINK: HTTP ${resp.code}")
-                    }
-                    if (resp.code == 404 || resp.code == 410) {
+                    } else if (resp.code == 404 || resp.code == 410) {
                         throw IllegalStateException("RESOURCE_NOT_FOUND: HTTP ${resp.code}")
                     }
-                    break
                 }
+                if (!redirected) break
             }
 
             // Confirm true Range support via GET Range: bytes=0-0
