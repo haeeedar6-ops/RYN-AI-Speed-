@@ -1,0 +1,64 @@
+# Hardened Production Stack for RYN-AI-Speed Central Backend
+# PostgreSQL & Redis are isolated on an internal-only Docker network (zero public port exposure).
+
+services:
+  backend:
+    build:
+      context: ../../backend
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    env_file:
+      - ../../backend/.env
+    environment:
+      APP_ENV: production
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-ryn_user}:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD required}@postgres:5432/${POSTGRES_DB:-ryn_ai_speed}
+      REDIS_URL: redis://redis:6379/0
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    ports:
+      - "127.0.0.1:8000:8000"
+    networks:
+      - ryn_internal
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-ryn_user}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD required}
+      POSTGRES_DB: ${POSTGRES_DB:-ryn_ai_speed}
+    volumes:
+      - ryn_pg_data:/var/lib/postgresql/data
+      - ../../shared/schemas/schema_postgres.sql:/docker-entrypoint-initdb.d/01_init.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-ryn_user} -d ${POSTGRES_DB:-ryn_ai_speed}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - ryn_internal
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command: ["redis-server", "--save", "60", "1", "--loglevel", "warning"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+    networks:
+      - ryn_internal
+
+volumes:
+  ryn_pg_data:
+
+networks:
+  ryn_internal:
+    driver: bridge
