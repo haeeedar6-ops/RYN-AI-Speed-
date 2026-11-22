@@ -44,6 +44,7 @@ dependencies {
     implementation(project(":core:database"))
     implementation(project(":feature:downloads"))
     implementation(project(":feature:browser"))
+    implementation(project(":feature:network"))
 
     implementation(libs.androidx.core.ktx)
     implementation(libs.androidx.activity.compose)
