@@ -34,3 +34,4 @@ jobs:
           dotnet build RynSpeed.Downloads/RynSpeed.Downloads.csproj --configuration Release --no-restore
           dotnet build RynSpeed.Browser/RynSpeed.Browser.csproj --configuration Release --no-restore
           dotnet build RynSpeed.Network/RynSpeed.Network.csproj --configuration Release --no-restore
+          dotnet build RynSpeed.VPN/RynSpeed.VPN.csproj --configuration Release --no-restore
