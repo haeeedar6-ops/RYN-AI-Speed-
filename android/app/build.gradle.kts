@@ -46,6 +46,7 @@ dependencies {
     implementation(project(":feature:browser"))
     implementation(project(":feature:network"))
     implementation(project(":feature:vpn"))
+    implementation(project(":feature:ai"))
 
     implementation(libs.androidx.core.ktx)
     implementation(libs.androidx.activity.compose)
