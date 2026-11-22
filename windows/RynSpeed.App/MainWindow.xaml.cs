@@ -75,7 +75,7 @@ public partial class MainWindow : Window
         try
         {
             var sb = new StringBuilder();
-            var pingRes = await _networkOptimizer.MeasureTcpLatencyAsync("1.1.1.1", 443, 5);
+            var pingRes = await RynNetworkOptimizer.MeasureTcpLatencyAsync("1.1.1.1", 443, 5);
             if (pingRes.IsSuccess && pingRes.Value is not null)
             {
                 _lastLatency = pingRes.Value;

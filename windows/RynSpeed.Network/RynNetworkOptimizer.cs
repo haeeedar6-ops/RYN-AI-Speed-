@@ -88,7 +88,7 @@ public sealed class RynNetworkOptimizer : IDisposable
         ("OpenDNS", "208.67.222.222")
     ];
 
-    public Task<RynResult<LatencyReport>> MeasureTcpLatencyAsync(
+    public static Task<RynResult<LatencyReport>> MeasureTcpLatencyAsync(
         string host,
         int port = 443,
         int count = 5,

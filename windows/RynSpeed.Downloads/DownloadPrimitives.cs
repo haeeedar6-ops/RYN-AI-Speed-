@@ -116,7 +116,7 @@ public sealed class SegmentCoordinator
     }
 }
 
-public sealed class TokenBucketLimiter(long bytesPerSecond = 0L)
+public sealed class TokenBucketLimiter(long bytesPerSecond = 0L) : IDisposable
 {
     private readonly SemaphoreSlim _gate = new(1, 1);
     private double _availableTokens;
@@ -154,6 +154,8 @@ public sealed class TokenBucketLimiter(long bytesPerSecond = 0L)
         if (delayMs > 0)
             await Task.Delay(delayMs, ct).ConfigureAwait(false);
     }
+
+    public void Dispose() => _gate.Dispose();
 }
 
 /// <summary>

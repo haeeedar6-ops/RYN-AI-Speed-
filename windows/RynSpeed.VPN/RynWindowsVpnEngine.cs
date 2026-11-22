@@ -1,3 +1,4 @@
+using System.Globalization;
 using System.Text;
 using System.Text.RegularExpressions;
 using RynSpeed.Core;
@@ -107,23 +108,43 @@ public static class WireGuardConfigBuilder
             throw new ArgumentException("Invalid client WireGuard private key.");
         if (!VpnServerScorer.IsValidWireGuardKey(server.PublicKey))
             throw new ArgumentException("Invalid server WireGuard public key.");
-        if (!server.Endpoint.Contains(':', StringComparison.Ordinal))
+        if (!IsValidEndpoint(server.Endpoint))
             throw new ArgumentException("Endpoint must be in host:port format.");
+        if (!IsSafeToken(clientAddressCidr, "./:") || !clientAddressCidr.Contains('/', StringComparison.Ordinal))
+            throw new ArgumentException("Client address must be a CIDR such as 10.66.66.2/32.");
 
         var dns = dnsResolvers is { Count: > 0 } ? dnsResolvers : ["1.1.1.1", "9.9.9.9"];
+        if (dns.Any(d => !IsSafeToken(d, ".:")))
+            throw new ArgumentException("Invalid DNS resolver.");
+
         var sb = new StringBuilder();
         sb.AppendLine("[Interface]");
-        sb.AppendLine($"PrivateKey = {clientPrivateKeyBase64}");
-        sb.AppendLine($"Address = {clientAddressCidr}");
-        sb.AppendLine($"DNS = {string.Join(", ", dns)}");
+        sb.AppendLine(string.Create(CultureInfo.InvariantCulture, $"PrivateKey = {clientPrivateKeyBase64}"));
+        sb.AppendLine(string.Create(CultureInfo.InvariantCulture, $"Address = {clientAddressCidr}"));
+        sb.AppendLine(string.Create(CultureInfo.InvariantCulture, $"DNS = {string.Join(", ", dns)}"));
         sb.AppendLine("MTU = 1280");
         sb.AppendLine();
         sb.AppendLine("[Peer]");
-        sb.AppendLine($"PublicKey = {server.PublicKey}");
-        sb.AppendLine($"Endpoint = {server.Endpoint}");
+        sb.AppendLine(string.Create(CultureInfo.InvariantCulture, $"PublicKey = {server.PublicKey}"));
+        sb.AppendLine(string.Create(CultureInfo.InvariantCulture, $"Endpoint = {server.Endpoint}"));
         sb.AppendLine("AllowedIPs = 0.0.0.0/0, ::/0");
         sb.AppendLine("PersistentKeepalive = 25");
         return sb.ToString();
+    }
+
+    // Values are written into a config file: allow only plain characters so a CR/LF or space can never
+    // inject extra directives (config injection).
+    private static bool IsSafeToken(string value, string extraAllowed) =>
+        !string.IsNullOrEmpty(value) && value.All(c => char.IsAsciiLetterOrDigit(c) || extraAllowed.Contains(c, StringComparison.Ordinal));
+
+    private static bool IsValidEndpoint(string endpoint)
+    {
+        var idx = endpoint.LastIndexOf(':');
+        if (idx <= 0 || idx == endpoint.Length - 1) return false;
+        var host = endpoint[..idx];
+        return IsSafeToken(host, ".-:[]") &&
+               int.TryParse(endpoint[(idx + 1)..], NumberStyles.None, CultureInfo.InvariantCulture, out var port) &&
+               port is >= 1 and <= 65535;
     }
 }
 

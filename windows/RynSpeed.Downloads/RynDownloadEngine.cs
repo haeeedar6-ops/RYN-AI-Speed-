@@ -117,7 +117,7 @@ public sealed class RynDownloadEngine : IDisposable
             var finalPath = ClaimUniqueTarget(categoryDir, probe.FileName);
             var tempPath = finalPath + DownloadPolicy.SparseTempExtension;
             var connections = DownloadPolicy.ComputeOptimalConnections(probe.FileSize, probe.SupportsRanges, maxConnectionsCap);
-            var itemLimiter = new TokenBucketLimiter(perDownloadLimitBps);
+            using var itemLimiter = new TokenBucketLimiter(perDownloadLimitBps);
             // If-Range needs a STRONG validator; a weak ETag (W/"..") would make servers answer 200.
             var ifRange = probe.ETag is { } etag && !etag.StartsWith("W/", StringComparison.Ordinal) ? etag : probe.LastModified;
 
@@ -357,5 +357,9 @@ public sealed class RynDownloadEngine : IDisposable
             throw new FileNotFoundException($"RESOURCE_NOT_FOUND: HTTP {(int)code}");
     }
 
-    public void Dispose() => _http.Dispose();
+    public void Dispose()
+    {
+        _globalLimiter.Dispose();
+        _http.Dispose();
+    }
 }
