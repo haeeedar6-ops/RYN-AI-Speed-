@@ -92,6 +92,23 @@ interface DownloadDao {
 
     @Query("SELECT * FROM download_segments WHERE download_id = :downloadId ORDER BY segment_index ASC")
     suspend fun getSegments(downloadId: String): List<DownloadSegmentEntity>
+
+    @Query("SELECT * FROM downloads WHERE id = :id LIMIT 1")
+    suspend fun getDownload(id: String): DownloadEntity?
+
+    @Query("DELETE FROM download_segments WHERE download_id = :downloadId")
+    suspend fun deleteSegments(downloadId: String)
+
+    /** Cheap progress checkpoint (does not touch any other column, so it can never clobber a status change). */
+    @Query("UPDATE downloads SET downloaded_bytes = :bytes, updated_at = :updatedAt WHERE id = :id")
+    suspend fun updateProgress(id: String, bytes: Long, updatedAt: String)
+
+    @Query("UPDATE downloads SET status = :status, updated_at = :updatedAt WHERE id = :id")
+    suspend fun updateStatus(id: String, status: String, updatedAt: String)
+
+    /** After a process death nothing is really running: mark those rows PAUSED so they can be resumed. */
+    @Query("UPDATE downloads SET status = 'PAUSED', updated_at = :updatedAt WHERE status IN ('DOWNLOADING','CONNECTING','RETRYING','QUEUED')")
+    suspend fun markInterruptedAsPaused(updatedAt: String): Int
 }
 
 @Database(

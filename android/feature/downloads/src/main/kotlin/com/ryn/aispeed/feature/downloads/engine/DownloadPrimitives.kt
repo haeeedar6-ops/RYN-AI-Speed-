@@ -23,6 +23,7 @@ object DownloadPolicy {
     const val CHECKPOINT_FLUSH_BYTES = 512L * 1024L               // 512 KB
     const val DISK_SAFETY_BUFFER_BYTES = 50L * 1024L * 1024L      // 50 MB
     const val SPARSE_TEMP_EXTENSION = ".ryntmp"
+    const val CHECKPOINT_INTERVAL_MS = 1_000L
 
     fun computeOptimalConnections(fileSize: Long?, supportsRanges: Boolean, userCap: Int): Int {
         if (!supportsRanges || fileSize == null || fileSize < MIN_RANGED_FILE_BYTES) return 1
@@ -34,6 +35,28 @@ object DownloadPolicy {
             else -> DEFAULT_MAX_CONNECTIONS
         }
         return min(recommended, cap)
+    }
+
+    /**
+     * A partial file may only be continued when the server still serves the very same bytes:
+     * ranges supported, identical size and identical validators. Otherwise we must restart.
+     */
+    fun canResume(savedSize: Long?, savedEtag: String?, savedLastModified: String?, probe: ProbeResult): Boolean =
+        probe.supportsRanges &&
+            probe.fileSize != null &&
+            probe.fileSize == savedSize &&
+            probe.etag == savedEtag &&
+            probe.lastModified == savedLastModified
+
+    /** True when the segments tile [0, fileSize-1] exactly (no gap, no overlap) - required to trust a checkpoint. */
+    fun coversWholeFile(segments: List<ActiveSegment>, fileSize: Long): Boolean {
+        val sorted = segments.sortedBy { it.startByte }
+        var expectedStart = 0L
+        for (seg in sorted) {
+            if (seg.startByte != expectedStart || seg.endByte < seg.startByte) return false
+            expectedStart = seg.endByte + 1L
+        }
+        return expectedStart == fileSize
     }
 
     fun classifyCategory(fileName: String, mimeType: String?): String {
@@ -160,6 +183,7 @@ class SparseFileWriter(
     }
 
     fun preallocate(totalBytes: Long) {
+        if (raf.length() == totalBytes) return // resuming: the file is already allocated, nothing new is needed
         val freeBytes = (tempFile.parentFile ?: tempFile).usableSpace
         if (freeBytes < totalBytes + DownloadPolicy.DISK_SAFETY_BUFFER_BYTES) {
             throw IllegalStateException("INSUFFICIENT_DISK_SPACE: Required ${totalBytes + DownloadPolicy.DISK_SAFETY_BUFFER_BYTES} bytes, available $freeBytes")
@@ -167,6 +191,11 @@ class SparseFileWriter(
         if (raf.length() != totalBytes) {
             raf.setLength(totalBytes)
         }
+    }
+
+    /** Pushes written data to disk so a checkpoint never claims more than the file really contains. */
+    fun flushData() {
+        channel.force(false)
     }
 
     fun writeAt(offset: Long, data: ByteArray, length: Int) {

@@ -11,7 +11,9 @@ import com.ryn.aispeed.core.security.LogRedactor
 import com.ryn.aispeed.core.security.UrlAndPathValidator
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.async
@@ -20,6 +22,8 @@ import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.isActive
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import okhttp3.Dns
 import okhttp3.OkHttpClient
@@ -30,7 +34,10 @@ import java.net.InetAddress
 import java.net.UnknownHostException
 import java.time.Instant
 import java.util.UUID
+import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.ConcurrentLinkedQueue
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicLong
 import kotlin.math.min
 import kotlin.random.Random
 
@@ -76,6 +83,18 @@ class RynDownloadEngine(
     // Downloads are intentionally detached from the caller: rotating the screen or leaving the
     // UI must not abort a half-written file. Workers inside one download are fully structured.
     private val engineScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+
+    /** downloadId -> running job. Used for pause/cancel and to refuse two parallel runs of one download. */
+    private val activeJobs = ConcurrentHashMap<String, Job>()
+
+    /** downloadId -> why the job is being stopped (STOP_PAUSED / STOP_CANCELED). */
+    private val stopRequests = ConcurrentHashMap<String, String>()
+
+    // After a process death nothing is really running: rows still marked DOWNLOADING become PAUSED so the
+    // user can resume them. Every download waits for this to finish so it can never be marked by mistake.
+    private val recoveryJob = engineScope.launch {
+        runCatching { downloadDao.markInterruptedAsPaused(Instant.now().toString()) }
+    }
 
     fun setGlobalSpeedLimit(bytesPerSecond: Long) {
         globalLimiter.bytesPerSecond = bytesPerSecond.coerceAtLeast(0L)
@@ -151,130 +170,277 @@ class RynDownloadEngine(
         expectedSha256: String? = null,
         maxConnectionsCap: Int = DownloadPolicy.DEFAULT_MAX_CONNECTIONS,
         perDownloadLimitBps: Long = 0L
-    ): RynResult<DownloadEntity> = runIsolated("DOWNLOAD_FAILED") {
-        engineScope.async {
-            runDownload(rawUrl, expectedSha256, maxConnectionsCap, perDownloadLimitBps)
-        }.await()
+    ): RynResult<DownloadEntity> {
+        val deferred = engineScope.async {
+            runIsolated("DOWNLOAD_FAILED") {
+                runDownload(rawUrl, expectedSha256, maxConnectionsCap, perDownloadLimitBps, null)
+            }
+        }
+        return awaitResult(deferred)
     }
+
+    /** Continues a PAUSED/FAILED download from its checkpoint (or restarts safely if the file changed). */
+    suspend fun resumeDownload(id: String): RynResult<DownloadEntity> {
+        val deferred = engineScope.async {
+            runIsolated("RESUME_FAILED") {
+                recoveryJob.join()
+                val saved = downloadDao.getDownload(id)
+                    ?: throw IllegalStateException("DOWNLOAD_NOT_FOUND: $id")
+                if (saved.status == "COMPLETED") {
+                    saved
+                } else {
+                    runDownload(saved.url, saved.sha256Expected, saved.maxConnections, saved.speedLimitBps, saved)
+                }
+            }
+        }
+        return awaitResult(deferred)
+    }
+
+    /** Stops a running download but keeps the partial file and checkpoint so it can be resumed. */
+    fun pauseDownload(id: String) {
+        val job = activeJobs[id] ?: return
+        stopRequests[id] = STOP_PAUSED
+        job.cancel()
+    }
+
+    /** Stops the download (if running) and deletes the partial file. */
+    suspend fun cancelDownload(id: String) {
+        val job = activeJobs[id]
+        if (job != null) {
+            stopRequests[id] = STOP_CANCELED
+            job.cancel()
+            job.join()
+            return
+        }
+        val saved = downloadDao.getDownload(id) ?: return
+        withContext(Dispatchers.IO) {
+            saved.tempPath?.let { runCatching { File(it).delete() } }
+        }
+        downloadDao.deleteSegments(id)
+        downloadDao.updateStatus(id, "CANCELED", Instant.now().toString())
+    }
+
+    private suspend fun awaitResult(deferred: Deferred<RynResult<DownloadEntity>>): RynResult<DownloadEntity> =
+        try {
+            deferred.await()
+        } catch (ce: CancellationException) {
+            // The download job was paused/canceled while the caller is still alive: report it, don't crash it.
+            if (currentCoroutineContext().isActive) {
+                RynResult.Failure("DOWNLOAD_INTERRUPTED", "Download was paused or canceled")
+            } else {
+                throw ce
+            }
+        }
 
     private suspend fun runDownload(
         rawUrl: String,
         expectedSha256: String?,
         maxConnectionsCap: Int,
-        perDownloadLimitBps: Long
+        perDownloadLimitBps: Long,
+        resumeFrom: DownloadEntity?
     ): DownloadEntity {
-        val probe = when (val p = probeUrl(rawUrl)) {
-            is RynResult.Success -> p.data
-            is RynResult.Failure -> throw IllegalStateException("${p.code}: ${p.message}")
-        }
-
-        val id = UUID.randomUUID().toString()
-        val now = Instant.now().toString()
-        val categoryDir = File(rootDownloadDir, probe.category.lowercase()).apply { mkdirs() }
-        val finalFile = claimUniqueTarget(categoryDir, probe.fileName)
-        val tempFile = tempFileFor(finalFile)
-        val connections = DownloadPolicy.computeOptimalConnections(
-            probe.fileSize, probe.supportsRanges, maxConnectionsCap
-        )
-
-        var entity = DownloadEntity(
-            id = id,
-            url = rawUrl,
-            finalUrl = probe.finalUrl,
-            fileName = finalFile.name,
-            category = probe.category,
-            mimeType = probe.mimeType,
-            fileSize = probe.fileSize,
-            status = "DOWNLOADING",
-            maxConnections = connections,
-            speedLimitBps = perDownloadLimitBps,
-            supportsRanges = if (probe.supportsRanges) 1 else 0,
-            etag = probe.etag,
-            lastModified = probe.lastModified,
-            sha256Expected = expectedSha256,
-            tempPath = tempFile.absolutePath,
-            savePath = finalFile.absolutePath,
-            createdAt = now,
-            updatedAt = now
-        )
+        recoveryJob.join()
+        val job = checkNotNull(currentCoroutineContext()[Job])
+        val id = resumeFrom?.id ?: UUID.randomUUID().toString()
+        check(activeJobs.putIfAbsent(id, job) == null) { "ALREADY_RUNNING: download $id is already active" }
 
         try {
-            downloadDao.upsertDownload(entity)
+            val probe = when (val p = probeUrl(rawUrl)) {
+                is RynResult.Success -> p.data
+                is RynResult.Failure -> throw IllegalStateException("${p.code}: ${p.message}")
+            }
+            val now = Instant.now().toString()
+            val connections = DownloadPolicy.computeOptimalConnections(
+                probe.fileSize, probe.supportsRanges, maxConnectionsCap
+            )
 
-            val itemLimiter = TokenBucketLimiter(perDownloadLimitBps)
-            // If-Range only works with STRONG validators; a weak ETag (W/"...") would make servers answer
-            // 200 and we would wrongly report "file changed". Fall back to Last-Modified in that case.
-            val ifRangeValidator = probe.etag?.takeUnless { it.startsWith("W/") } ?: probe.lastModified
+            // ---- decide: continue the partial file, or (re)start from zero ----
+            val finalFile: File
+            val tempFile: File
+            var reusable: List<ActiveSegment>? = null
+            if (resumeFrom != null) {
+                finalFile = File(resumeFrom.savePath)
+                tempFile = File(resumeFrom.tempPath ?: tempFileFor(finalFile).absolutePath)
+                val loaded: List<ActiveSegment> =
+                    if (tempFile.exists() &&
+                        DownloadPolicy.canResume(resumeFrom.fileSize, resumeFrom.etag, resumeFrom.lastModified, probe)
+                    ) {
+                        downloadDao.getSegments(id).map { seg ->
+                            ActiveSegment(
+                                id = seg.id,
+                                index = seg.segmentIndex,
+                                startByte = seg.startByte,
+                                endByte = seg.endByte,
+                                downloadedBytes = AtomicLong(seg.downloadedBytes),
+                                status = "PENDING",
+                                retryCount = 0
+                            )
+                        }
+                    } else {
+                        emptyList()
+                    }
+                val size = probe.fileSize
+                reusable = loaded.takeIf {
+                    it.isNotEmpty() && size != null && tempFile.length() == size &&
+                        DownloadPolicy.coversWholeFile(it, size)
+                }
+                if (reusable == null) {
+                    // The server file changed (or the checkpoint is unusable): never mix old and new bytes.
+                    withContext(Dispatchers.IO) {
+                        runCatching { tempFile.delete() }
+                        tempFile.parentFile?.mkdirs()
+                        tempFile.createNewFile()
+                    }
+                    downloadDao.deleteSegments(id)
+                }
+            } else {
+                val categoryDir = File(rootDownloadDir, probe.category.lowercase()).apply { mkdirs() }
+                finalFile = claimUniqueTarget(categoryDir, probe.fileName)
+                tempFile = tempFileFor(finalFile)
+            }
 
-            val actualSha256 = withContext(Dispatchers.IO) {
-                SparseFileWriter(tempFile, finalFile).use { writer ->
-                    val fileSize = probe.fileSize
-                    if (probe.supportsRanges && fileSize != null && fileSize >= DownloadPolicy.MIN_RANGED_FILE_BYTES) {
-                        writer.preallocate(fileSize)
-                        val initialSegments = buildInitialSegments(id, fileSize, connections)
-                        persistSegments(id, initialSegments)
-                        val coordinator = SegmentCoordinator(id, initialSegments)
+            val reusableSegments = reusable
+            val startBytes = reusableSegments
+                ?.sumOf { minOf(it.downloadedBytes.get(), it.endByte - it.startByte + 1L) } ?: 0L
 
-                        // coroutineScope = structured: the first failing worker cancels all siblings.
-                        coroutineScope {
-                            (0 until connections).map { workerIdx ->
-                                async {
-                                    var seg: ActiveSegment? = initialSegments.getOrNull(workerIdx)
-                                    while (seg != null) {
-                                        downloadSegment(
-                                            url = probe.finalUrl,
-                                            segment = seg,
-                                            ifRange = ifRangeValidator,
-                                            writer = writer,
-                                            itemLimiter = itemLimiter,
-                                            downloadId = id,
-                                            totalSize = fileSize
-                                        )
-                                        seg = coordinator.stealWorkOrNull()
+            var entity = DownloadEntity(
+                id = id,
+                url = rawUrl,
+                finalUrl = probe.finalUrl,
+                fileName = finalFile.name,
+                category = probe.category,
+                mimeType = probe.mimeType,
+                fileSize = probe.fileSize,
+                downloadedBytes = startBytes,
+                status = "DOWNLOADING",
+                priority = resumeFrom?.priority ?: 1,
+                maxConnections = connections,
+                speedLimitBps = perDownloadLimitBps,
+                supportsRanges = if (probe.supportsRanges) 1 else 0,
+                etag = probe.etag,
+                lastModified = probe.lastModified,
+                sha256Expected = expectedSha256,
+                tempPath = tempFile.absolutePath,
+                savePath = finalFile.absolutePath,
+                createdAt = resumeFrom?.createdAt ?: now,
+                updatedAt = now
+            )
+
+            var coordinatorRef: SegmentCoordinator? = null
+            try {
+                downloadDao.upsertDownload(entity)
+
+                val itemLimiter = TokenBucketLimiter(perDownloadLimitBps)
+                // If-Range only works with STRONG validators; a weak ETag (W/"...") would make servers answer
+                // 200 and we would wrongly report "file changed". Fall back to Last-Modified in that case.
+                val ifRangeValidator = probe.etag?.takeUnless { it.startsWith("W/") } ?: probe.lastModified
+
+                val actualSha256 = withContext(Dispatchers.IO) {
+                    SparseFileWriter(tempFile, finalFile).use { writer ->
+                        val fileSize = probe.fileSize
+                        if (probe.supportsRanges && fileSize != null && fileSize >= DownloadPolicy.MIN_RANGED_FILE_BYTES) {
+                            writer.preallocate(fileSize)
+                            val initialSegments: List<ActiveSegment> =
+                                reusableSegments?.onEach {
+                                    it.status = if (it.currentPosition() > it.endByte) "COMPLETED" else "PENDING"
+                                } ?: buildInitialSegments(id, fileSize, connections)
+                            persistSegments(id, initialSegments)
+                            val coordinator = SegmentCoordinator(id, initialSegments)
+                            coordinatorRef = coordinator
+                            val queue = ConcurrentLinkedQueue(initialSegments.filter { it.currentPosition() <= it.endByte })
+
+                            // coroutineScope = structured: the first failing worker cancels all siblings.
+                            coroutineScope {
+                                val checkpoint = launch {
+                                    while (true) {
+                                        delay(DownloadPolicy.CHECKPOINT_INTERVAL_MS)
+                                        writer.flushData()
+                                        checkpointProgress(id, coordinator)
                                     }
                                 }
-                            }.awaitAll()
+                                val workers = (0 until connections).map {
+                                    async {
+                                        var seg: ActiveSegment? = queue.poll()
+                                        while (seg != null) {
+                                            downloadSegment(
+                                                url = probe.finalUrl,
+                                                segment = seg,
+                                                ifRange = ifRangeValidator,
+                                                writer = writer,
+                                                itemLimiter = itemLimiter,
+                                                downloadId = id,
+                                                totalSize = fileSize
+                                            )
+                                            seg = queue.poll() ?: coordinator.stealWorkOrNull()
+                                        }
+                                    }
+                                }
+                                try {
+                                    workers.awaitAll()
+                                } finally {
+                                    checkpoint.cancel()
+                                }
+                            }
+                            persistSegments(id, coordinator.snapshot())
+                        } else {
+                            downloadSingleStream(probe.finalUrl, writer, itemLimiter, id, probe.fileSize)
                         }
-                        persistSegments(id, coordinator.snapshot())
-                    } else {
-                        downloadSingleStream(probe.finalUrl, writer, itemLimiter, id, probe.fileSize)
+                        writer.finalizeAtomically(probe.fileSize, expectedSha256)
                     }
-                    writer.finalizeAtomically(probe.fileSize, expectedSha256)
                 }
-            }
 
-            entity = entity.copy(
-                status = "COMPLETED",
-                downloadedBytes = finalFile.length(),
-                sha256Actual = actualSha256,
-                updatedAt = Instant.now().toString()
-            )
-            downloadDao.upsertDownload(entity)
-            return entity
-        } catch (ce: CancellationException) {
-            withContext(NonCancellable) {
-                runCatching { tempFile.delete() }
-                runCatching {
-                    downloadDao.upsertDownload(entity.copy(status = "CANCELED", updatedAt = Instant.now().toString()))
+                entity = entity.copy(
+                    status = "COMPLETED",
+                    downloadedBytes = finalFile.length(),
+                    sha256Actual = actualSha256,
+                    updatedAt = Instant.now().toString()
+                )
+                downloadDao.upsertDownload(entity)
+                return entity
+            } catch (ce: CancellationException) {
+                val reason = stopRequests.remove(id)
+                withContext(NonCancellable) {
+                    if (reason == STOP_CANCELED) {
+                        runCatching { tempFile.delete() }
+                        runCatching { downloadDao.deleteSegments(id) }
+                        runCatching { downloadDao.updateStatus(id, "CANCELED", Instant.now().toString()) }
+                    } else {
+                        // Paused by the user or interrupted: keep the partial file + checkpoint for resume.
+                        runCatching { coordinatorRef?.let { checkpointProgress(id, it) } }
+                        runCatching { downloadDao.updateStatus(id, "PAUSED", Instant.now().toString()) }
+                    }
                 }
-            }
-            throw ce
-        } catch (e: Exception) {
-            withContext(NonCancellable) {
-                runCatching { tempFile.delete() }
-                runCatching {
-                    downloadDao.upsertDownload(
-                        entity.copy(
-                            status = "FAILED",
-                            lastErrorCode = "DOWNLOAD_FAILED",
-                            lastErrorMessage = LogRedactor.redact(e.message ?: e.javaClass.simpleName),
-                            updatedAt = Instant.now().toString()
+                throw ce
+            } catch (e: Exception) {
+                val resumable = coordinatorRef != null
+                withContext(NonCancellable) {
+                    if (!resumable) runCatching { tempFile.delete() }
+                    runCatching { coordinatorRef?.let { checkpointProgress(id, it) } }
+                    runCatching {
+                        val row = downloadDao.getDownload(id) ?: entity
+                        downloadDao.upsertDownload(
+                            row.copy(
+                                status = "FAILED",
+                                lastErrorCode = "DOWNLOAD_FAILED",
+                                lastErrorMessage = LogRedactor.redact(e.message ?: e.javaClass.simpleName),
+                                updatedAt = Instant.now().toString()
+                            )
                         )
-                    )
+                    }
                 }
+                throw e
             }
-            throw e
+        } finally {
+            activeJobs.remove(id, job)
+            stopRequests.remove(id)
         }
+    }
+
+    private suspend fun checkpointProgress(id: String, coordinator: SegmentCoordinator) {
+        val snapshot = coordinator.snapshot()
+        persistSegments(id, snapshot)
+        val done = snapshot.sumOf { minOf(it.downloadedBytes.get(), it.endByte - it.startByte + 1L) }
+        downloadDao.updateProgress(id, done, Instant.now().toString())
     }
 
     private suspend fun downloadSegment(
@@ -389,6 +555,7 @@ class RynDownloadEngine(
             val stream = resp.body?.byteStream() ?: throw IllegalStateException("Empty body")
             val buf = ByteArray(32 * 1024)
             var offset = 0L
+            var sinceCheckpoint = 0L
             while (true) {
                 currentCoroutineContext().ensureActive()
                 val read = stream.read(buf)
@@ -397,7 +564,12 @@ class RynDownloadEngine(
                 itemLimiter.acquire(read)
                 writer.writeAt(offset, buf, read)
                 offset += read
-                eventBus.emit(ModuleEvent.DownloadProgress(downloadId, offset, totalSize))
+                sinceCheckpoint += read
+                if (sinceCheckpoint >= DownloadPolicy.CHECKPOINT_FLUSH_BYTES) {
+                    sinceCheckpoint = 0L
+                    eventBus.emit(ModuleEvent.DownloadProgress(downloadId, offset, totalSize))
+                    downloadDao.updateProgress(downloadId, offset, Instant.now().toString())
+                }
             }
         }
     }
@@ -470,5 +642,7 @@ class RynDownloadEngine(
         const val MAX_REDIRECTS = 5
         const val MAX_SEGMENT_RETRIES = 5
         const val MAX_DUPLICATE_NAMES = 9_999
+        const val STOP_PAUSED = "PAUSED"
+        const val STOP_CANCELED = "CANCELED"
     }
 }

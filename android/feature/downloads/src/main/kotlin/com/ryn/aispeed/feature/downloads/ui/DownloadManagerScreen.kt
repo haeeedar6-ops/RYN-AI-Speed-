@@ -35,7 +35,8 @@ fun DownloadManagerScreen(
     onAddUrl: (String) -> Unit,
     onPause: (String) -> Unit,
     onResume: (String) -> Unit,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    onCancel: (String) -> Unit = {}
 ) {
     var urlInput by remember { mutableStateOf("") }
 
@@ -79,7 +80,7 @@ fun DownloadManagerScreen(
 
         LazyColumn(verticalArrangement = Arrangement.spacedBy(10.dp)) {
             items(downloads, key = { it.id }) { item ->
-                DownloadItemCard(item = item, onPause = onPause, onResume = onResume)
+                DownloadItemCard(item = item, onPause = onPause, onResume = onResume, onCancel = onCancel)
             }
         }
     }
@@ -89,7 +90,8 @@ fun DownloadManagerScreen(
 private fun DownloadItemCard(
     item: DownloadEntity,
     onPause: (String) -> Unit,
-    onResume: (String) -> Unit
+    onResume: (String) -> Unit,
+    onCancel: (String) -> Unit
 ) {
     val totalSize = item.fileSize
     val progress = if (totalSize != null && totalSize > 0L) {
@@ -108,7 +110,7 @@ private fun DownloadItemCard(
                 fontWeight = FontWeight.SemiBold
             )
             Text(
-                text = "${item.status} • ${item.category} • ${item.maxConnections} conn",
+                text = "${item.status} • ${(progress * 100f).toInt()}% • ${item.category} • ${item.maxConnections} conn",
                 color = Color(0xFF9CA3AF),
                 style = MaterialTheme.typography.bodySmall
             )
@@ -123,6 +125,12 @@ private fun DownloadItemCard(
                     Button(onClick = { onPause(item.id) }) { Text("Pause") }
                 } else if (item.status == "PAUSED" || item.status == "FAILED") {
                     Button(onClick = { onResume(item.id) }) { Text("Resume") }
+                }
+                if (item.status == "DOWNLOADING" || item.status == "PAUSED" || item.status == "FAILED") {
+                    Button(
+                        onClick = { onCancel(item.id) },
+                        colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF7F1D1D))
+                    ) { Text("Cancel") }
                 }
             }
         }

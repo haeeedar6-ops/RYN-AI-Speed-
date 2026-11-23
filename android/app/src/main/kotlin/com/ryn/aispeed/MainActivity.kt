@@ -50,6 +50,7 @@ import androidx.compose.ui.viewinterop.AndroidView
 import com.ryn.aispeed.core.common.ModuleEventBus
 import com.ryn.aispeed.core.common.RynResult
 import com.ryn.aispeed.core.database.DownloadDao
+import com.ryn.aispeed.core.database.DownloadEntity
 import com.ryn.aispeed.feature.ai.AiAutoManager
 import com.ryn.aispeed.feature.ai.LocalAiRulesEngine
 import com.ryn.aispeed.feature.browser.ExternalLinkExtractor
@@ -103,11 +104,9 @@ class MainActivity : ComponentActivity() {
 
         val dlRoot = getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS) ?: File(filesDir, "downloads")
         dlRoot.mkdirs()
-        downloadEngine = RynDownloadEngine(
-            downloadDao = downloadDao,
-            eventBus = eventBus,
-            rootDownloadDir = dlRoot
-        )
+        // One engine per PROCESS (not per Activity): rotating the screen must not create a second engine
+        // that cannot see (or pause) the downloads already running.
+        downloadEngine = DownloadEngineHolder.get(downloadDao, eventBus, dlRoot)
 
         handleIncomingShareIntent(intent)
 
@@ -179,10 +178,7 @@ private fun RynMainAppShell(
         onConsumeSharedUrl()
         scope.launch {
             statusBanner = "جاري فحص الرابط المشارك..."
-            when (val res = downloadEngine.startDownload(urlToStart)) {
-                is RynResult.Success -> statusBanner = "اكتمل التنزيل: ${res.data.fileName}"
-                is RynResult.Failure -> statusBanner = "خطأ تنزيل: ${res.message}"
-            }
+            statusBanner = describeDownloadResult(downloadEngine.startDownload(urlToStart))
         }
     }
 
@@ -239,14 +235,25 @@ private fun RynMainAppShell(
                     onAddUrl = { url ->
                         scope.launch {
                             statusBanner = "جاري تنزيل الرابط..."
-                            when (val res = downloadEngine.startDownload(url)) {
-                                is RynResult.Success -> statusBanner = "اكتمل التنزيل بنجاح: ${res.data.fileName}"
-                                is RynResult.Failure -> statusBanner = "فشل التنزيل: ${res.message}"
-                            }
+                            statusBanner = describeDownloadResult(downloadEngine.startDownload(url))
                         }
                     },
-                    onPause = { statusBanner = "تم طلب إيقاف مؤقت للتنزيل" },
-                    onResume = { statusBanner = "تم طلب استئناف التنزيل" }
+                    onPause = { id ->
+                        downloadEngine.pauseDownload(id)
+                        statusBanner = "تم إيقاف التنزيل مؤقتاً"
+                    },
+                    onResume = { id ->
+                        scope.launch {
+                            statusBanner = "جاري استئناف التنزيل..."
+                            statusBanner = describeDownloadResult(downloadEngine.resumeDownload(id))
+                        }
+                    },
+                    onCancel = { id ->
+                        scope.launch {
+                            downloadEngine.cancelDownload(id)
+                            statusBanner = "تم إلغاء التنزيل وحذف الملف المؤقت"
+                        }
+                    }
                 )
 
                 2 -> BuiltInBrowserTab(
@@ -254,10 +261,7 @@ private fun RynMainAppShell(
                         selectedTab = 1
                         scope.launch {
                             statusBanner = "تم التقاط رابط من المتصفح..."
-                            when (val res = downloadEngine.startDownload(url)) {
-                                is RynResult.Success -> statusBanner = "اكتمل تنزيل المتصفح: ${res.data.fileName}"
-                                is RynResult.Failure -> statusBanner = "خطأ تنزيل: ${res.message}"
-                            }
+                            statusBanner = describeDownloadResult(downloadEngine.startDownload(url))
                         }
                     }
                 )
@@ -550,4 +554,22 @@ private fun AiAssistantTab(lastLatency: LatencyReport?) {
             }
         }
     }
+}
+
+
+/** One download engine for the whole process (survives Activity re-creation). */
+private object DownloadEngineHolder {
+    @Volatile
+    private var engine: RynDownloadEngine? = null
+
+    fun get(dao: DownloadDao, bus: ModuleEventBus, root: File): RynDownloadEngine =
+        engine ?: synchronized(this) {
+            engine ?: RynDownloadEngine(downloadDao = dao, eventBus = bus, rootDownloadDir = root).also { engine = it }
+        }
+}
+
+private fun describeDownloadResult(res: RynResult<DownloadEntity>): String = when (res) {
+    is RynResult.Success -> "اكتمل التنزيل: ${res.data.fileName}"
+    is RynResult.Failure ->
+        if (res.code == "DOWNLOAD_INTERRUPTED") "تم إيقاف التنزيل" else "فشل التنزيل: ${res.message}"
 }

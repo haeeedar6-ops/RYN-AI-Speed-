@@ -26,7 +26,7 @@ Ran: backend unit tests (19), root security audit + integration suites (10), `va
 
 ## Known gaps (not fixed, need design work)
 1. FIXED: users and refresh-token families are now stored in SQLite (`app/core/store.py`, WAL, atomic token claim) on a Docker volume `/data`. Still in memory: the VPN server registry and AI nonces (re-populated at start). Single-instance only; Postgres in compose is still unused.
-2. No pause/resume/cancel API and no periodic segment checkpoint in either download engine (needed for resume after restart).
+2. Android: FIXED - pause / resume / cancel, 1-second checkpoints of every segment, resume after app/process death (re-probes the server and restarts safely if the file changed), live progress in the UI, one engine per process. Windows engine: still TODO (same design).
 3. No real WireGuard integration yet (P5) and no gradle wrapper in `android/`.
 4. `/api/v1/version` still returns placeholder checksum/signature; clients must reject them.
 
@@ -35,3 +35,8 @@ Ran: backend unit tests (19), root security audit + integration suites (10), `va
 - `CA1822` in `RynNetworkOptimizer.MeasureTcpLatencyAsync` -> `static` (call site in `MainWindow.xaml.cs` updated).
 - `CA1001` in `TokenBucketLimiter` -> now `IDisposable`; the engine disposes it.
 - `Directory.Build.props`: analyzer (CA) warnings no longer fail the release build (compiler warnings still do), so one style rule cannot block a release.
+
+## Round 4 - Android pause / resume / cancel
+- `RynDownloadEngine`: `pauseDownload`, `resumeDownload`, `cancelDownload`; checkpoint (segments + bytes) every second; `FAILED` downloads keep their partial file so they can be resumed; rows left "DOWNLOADING" after a crash become "PAUSED" at startup.
+- Resume is only allowed when size + ETag + Last-Modified are unchanged and the saved segments tile the file exactly (`DownloadPolicy.canResume` / `coversWholeFile`, unit-tested); otherwise it restarts from zero so old and new bytes are never mixed.
+- UI: Pause / Resume / Cancel buttons + percentage; `MainActivity` shares one engine for the whole process.
