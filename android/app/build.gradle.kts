@@ -19,8 +19,28 @@ android {
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
 
+    // Real release key comes from GitHub Secrets (see release.yml). Without it the release APK is signed
+    // with the debug key so it is ALWAYS installable ("unsigned" APKs are rejected by Android).
+    val releaseKeystore = file("release.keystore")
+    val hasReleaseKey = releaseKeystore.exists() &&
+        System.getenv("ANDROID_KEYSTORE_PASSWORD") != null &&
+        System.getenv("ANDROID_KEY_ALIAS") != null &&
+        System.getenv("ANDROID_KEY_PASSWORD") != null
+
+    signingConfigs {
+        if (hasReleaseKey) {
+            create("release") {
+                storeFile = releaseKeystore
+                storePassword = System.getenv("ANDROID_KEYSTORE_PASSWORD")
+                keyAlias = System.getenv("ANDROID_KEY_ALIAS")
+                keyPassword = System.getenv("ANDROID_KEY_PASSWORD")
+            }
+        }
+    }
+
     buildTypes {
         release {
+            signingConfig = if (hasReleaseKey) signingConfigs.getByName("release") else signingConfigs.getByName("debug")
             isMinifyEnabled = true
             isShrinkResources = true
             proguardFiles(

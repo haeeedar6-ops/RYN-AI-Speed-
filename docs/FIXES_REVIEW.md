@@ -40,3 +40,7 @@ Ran: backend unit tests (19), root security audit + integration suites (10), `va
 - `RynDownloadEngine`: `pauseDownload`, `resumeDownload`, `cancelDownload`; checkpoint (segments + bytes) every second; `FAILED` downloads keep their partial file so they can be resumed; rows left "DOWNLOADING" after a crash become "PAUSED" at startup.
 - Resume is only allowed when size + ETag + Last-Modified are unchanged and the saved segments tile the file exactly (`DownloadPolicy.canResume` / `coversWholeFile`, unit-tested); otherwise it restarts from zero so old and new bytes are never mixed.
 - UI: Pause / Resume / Cancel buttons + percentage; `MainActivity` shares one engine for the whole process.
+
+## Round 5 - APK "package appears invalid"
+Cause: the release APK was **unsigned** (`app-release-unsigned.apk`); Android refuses to install unsigned APKs. The workflow decoded a keystore but Gradle never used it.
+Fix: `app/build.gradle.kts` now signs release with the secret keystore when present, otherwise with the debug key (always installable). Install `app-debug.apk` / `app-release.apk`, never `*-unsigned.apk`.
