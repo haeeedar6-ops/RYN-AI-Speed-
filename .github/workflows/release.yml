@@ -52,6 +52,10 @@ jobs:
             echo "ANDROID_KEYSTORE_BASE64 not set; building installable Debug APK alongside Release APK."
           fi
       - name: Build Android Installable APK (Debug + Release)
+        env:
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
         run: gradle assembleDebug assembleRelease --stacktrace
       - name: Generate SHA-256 Checksums
         run: sha256sum app/build/outputs/apk/debug/*.apk app/build/outputs/apk/release/*.apk > ../android-sha256.txt || true
