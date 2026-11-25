@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using System.Net;
 using System.Net.Http.Headers;
 using System.Net.Sockets;
@@ -163,6 +164,189 @@ public sealed class RynDownloadEngine : IDisposable
             return (finalPath, sha256);
         }, ct);
 
+    /// <summary>
+    /// Runs (or continues) one download job. Throws on failure / cancellation; the caller decides what
+    /// pause, cancel and failure mean. The job object always holds the latest checkpoint.
+    /// </summary>
+    public async Task RunJobAsync(DownloadJob job, Action onCheckpoint, CancellationToken ct)
+    {
+        var probeRes = await ProbeUrlAsync(job.Url, ct).ConfigureAwait(false);
+        if (!probeRes.IsSuccess || probeRes.Value is null)
+            throw new InvalidOperationException($"{probeRes.ErrorCode}: {probeRes.ErrorMessage}");
+        var probe = probeRes.Value;
+
+        // Continue the partial file only if the server still serves exactly the same bytes.
+        var canResume = CanResume(job, probe);
+        if (!canResume)
+        {
+            if (job.TempPath is not null) TryDeleteFile(job.TempPath);
+            if (job.FinalPath is null)
+            {
+                var categoryDir = Path.Combine(_rootDownloadDir, probe.Category.ToLowerInvariant());
+                Directory.CreateDirectory(categoryDir);
+                job.FinalPath = ClaimUniqueTarget(categoryDir, probe.FileName);
+            }
+            job.TempPath = job.FinalPath + DownloadPolicy.SparseTempExtension;
+            job.Segments = [];
+            job.DownloadedBytes = 0;
+        }
+
+        var finalPath = job.FinalPath ?? throw new InvalidOperationException("Missing target path.");
+        var tempPath = job.TempPath ?? throw new InvalidOperationException("Missing temp path.");
+        job.FileName = Path.GetFileName(finalPath);
+        job.Category = probe.Category;
+        job.FileSize = probe.FileSize;
+        job.SupportsRanges = probe.SupportsRanges;
+        job.ETag = probe.ETag;
+        job.LastModified = probe.LastModified;
+        job.Status = "DOWNLOADING";
+        job.LastError = null;
+        onCheckpoint();
+
+        var connections = DownloadPolicy.ComputeOptimalConnections(probe.FileSize, probe.SupportsRanges, job.MaxConnections);
+        using var itemLimiter = new TokenBucketLimiter(job.SpeedLimitBps);
+        // If-Range needs a STRONG validator; a weak ETag (W/"..") would make servers answer 200.
+        var ifRange = probe.ETag is { } etag && !etag.StartsWith("W/", StringComparison.Ordinal) ? etag : probe.LastModified;
+
+        using var writer = new SparseFileWriter(tempPath, finalPath);
+        if (probe.SupportsRanges && probe.FileSize is >= DownloadPolicy.MinRangedFileBytes)
+        {
+            var size = probe.FileSize.Value;
+            writer.Preallocate(size);
+            var segments = canResume ? RestoreSegments(job) : BuildInitialSegments(job.Id, size, connections);
+            foreach (var s in segments)
+            {
+                if (s.CurrentPosition() > s.EndByte) s.Status = "COMPLETED";
+            }
+
+            var coordinator = new SegmentCoordinator(job.Id, segments);
+            var queue = new ConcurrentQueue<ActiveSegment>(segments.Where(s => s.Status != "COMPLETED"));
+
+            using var checkpointCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+            var checkpointTask = CheckpointLoopAsync(job, writer, coordinator, onCheckpoint, checkpointCts.Token);
+            try
+            {
+                using var workersCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+                var workerToken = workersCts.Token;
+                var workers = Enumerable.Range(0, connections).Select(_ => Task.Run(async () =>
+                {
+                    try
+                    {
+                        ActiveSegment? seg = queue.TryDequeue(out var first) ? first : null;
+                        while (seg is not null)
+                        {
+                            await DownloadSegmentAsync(
+                                probe.FinalUri, seg, ifRange, writer, itemLimiter, job.Id, size, workerToken
+                            ).ConfigureAwait(false);
+                            seg = queue.TryDequeue(out var next) ? next : coordinator.StealWorkOrNull();
+                        }
+                    }
+                    catch (Exception) when (!workerToken.IsCancellationRequested)
+                    {
+                        await workersCts.CancelAsync().ConfigureAwait(false);
+                        throw;
+                    }
+                }, CancellationToken.None)).ToArray();
+
+                await Task.WhenAll(workers).ConfigureAwait(false);
+            }
+            finally
+            {
+                // Always leave a final, consistent checkpoint (also when paused or failed).
+                await checkpointCts.CancelAsync().ConfigureAwait(false);
+                await checkpointTask.ConfigureAwait(false);
+                writer.FlushToDisk();
+                CaptureSnapshot(job, coordinator);
+                onCheckpoint();
+            }
+        }
+        else
+        {
+            await DownloadSingleStreamAsync(probe.FinalUri, writer, itemLimiter, job.Id, probe.FileSize, ct, offset => job.DownloadedBytes = offset)
+                .ConfigureAwait(false);
+        }
+
+        var sha256 = await writer.FinalizeAtomicallyAsync(probe.FileSize, job.ExpectedSha256, ct).ConfigureAwait(false);
+        job.ActualSha256 = sha256;
+        job.DownloadedBytes = new FileInfo(finalPath).Length;
+        job.Segments = [];
+        job.Status = "COMPLETED";
+        onCheckpoint();
+    }
+
+    private static async Task CheckpointLoopAsync(
+        DownloadJob job, SparseFileWriter writer, SegmentCoordinator coordinator, Action onCheckpoint, CancellationToken ct)
+    {
+        try
+        {
+            using var timer = new PeriodicTimer(TimeSpan.FromSeconds(1));
+            while (await timer.WaitForNextTickAsync(ct).ConfigureAwait(false))
+            {
+                writer.FlushToDisk(); // flush first, then record: the checkpoint can never be ahead of the disk
+                CaptureSnapshot(job, coordinator);
+                onCheckpoint();
+            }
+        }
+        catch (OperationCanceledException)
+        {
+            // normal shutdown of the checkpoint loop
+        }
+    }
+
+    private static void CaptureSnapshot(DownloadJob job, SegmentCoordinator coordinator)
+    {
+        var states = coordinator.Snapshot().Select(s => new SegmentState
+        {
+            Id = s.Id,
+            Index = s.Index,
+            StartByte = s.StartByte,
+            EndByte = s.EndByte,
+            DownloadedBytes = Math.Min(s.DownloadedBytes, s.EndByte - s.StartByte + 1L)
+        }).ToList();
+        job.Segments = states;
+        job.DownloadedBytes = states.Sum(x => x.DownloadedBytes);
+    }
+
+    private static List<ActiveSegment> RestoreSegments(DownloadJob job)
+    {
+        var list = new List<ActiveSegment>();
+        foreach (var s in job.Segments.OrderBy(x => x.Index))
+        {
+            var seg = new ActiveSegment(s.Id, s.Index, s.StartByte, s.EndByte);
+            seg.AddDownloaded(Math.Clamp(s.DownloadedBytes, 0L, s.EndByte - s.StartByte + 1L));
+            list.Add(seg);
+        }
+        return list;
+    }
+
+    private static bool CanResume(DownloadJob job, ProbeResult probe)
+    {
+        if (job.TempPath is null || job.FinalPath is null || job.Segments.Count == 0) return false;
+        if (!probe.SupportsRanges || probe.FileSize is null) return false;
+        if (job.FileSize != probe.FileSize || job.ETag != probe.ETag || job.LastModified != probe.LastModified) return false;
+        if (!File.Exists(job.TempPath) || new FileInfo(job.TempPath).Length != probe.FileSize.Value) return false;
+
+        long expectedStart = 0;
+        foreach (var s in job.Segments.OrderBy(x => x.StartByte))
+        {
+            if (s.StartByte != expectedStart || s.EndByte < s.StartByte) return false;
+            expectedStart = s.EndByte + 1L;
+        }
+        return expectedStart == probe.FileSize.Value;
+    }
+
+    private static void TryDeleteFile(string path)
+    {
+        try
+        {
+            File.Delete(path);
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            // best effort: a locked temp file is cleaned up by the next run
+        }
+    }
+
     private async Task DownloadSegmentAsync(
         Uri uri,
         ActiveSegment segment,
@@ -266,7 +450,7 @@ public sealed class RynDownloadEngine : IDisposable
 
     private async Task DownloadSingleStreamAsync(
         Uri uri, SparseFileWriter writer, TokenBucketLimiter itemLimiter,
-        string downloadId, long? totalSize, CancellationToken ct)
+        string downloadId, long? totalSize, CancellationToken ct, Action<long>? onBytes = null)
     {
         using var resp = await _http.GetAsync(uri, HttpCompletionOption.ResponseHeadersRead, ct).ConfigureAwait(false);
         CheckFatalStatus(resp.StatusCode);
@@ -283,6 +467,7 @@ public sealed class RynDownloadEngine : IDisposable
             await itemLimiter.AcquireAsync(read, ct).ConfigureAwait(false);
             await writer.WriteAtAsync(offset, buffer.AsMemory(0, read), ct).ConfigureAwait(false);
             offset += read;
+            onBytes?.Invoke(offset);
             _eventBus.Publish(new DownloadProgressEvent(downloadId, offset, totalSize));
         }
     }

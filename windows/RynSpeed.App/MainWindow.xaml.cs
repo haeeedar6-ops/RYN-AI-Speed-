@@ -1,6 +1,10 @@
+using System.Collections.ObjectModel;
+using System.Diagnostics;
 using System.IO;
 using System.Text;
 using System.Windows;
+using System.Windows.Controls;
+using System.Windows.Threading;
 using RynSpeed.AI;
 using RynSpeed.Core;
 using RynSpeed.Downloads;
@@ -12,6 +16,11 @@ public partial class MainWindow : Window
 {
     private readonly ModuleEventBus _eventBus = new();
     private readonly RynDownloadEngine _downloadEngine;
+    private readonly DownloadManager _downloads;
+    private readonly ObservableCollection<DownloadRow> _rows = [];
+    private readonly DispatcherTimer _uiTimer = new() { Interval = TimeSpan.FromMilliseconds(500) };
+    private readonly string _downloadDir;
+    private string _lastClipboardUrl = string.Empty;
     private readonly RynNetworkOptimizer _networkOptimizer = new();
     private readonly AiAutoManager _aiAutoManager = new(initialEnabled: true);
     private LatencyReport? _lastLatency;
@@ -24,7 +33,20 @@ public partial class MainWindow : Window
             "Downloads",
             "RYN-AI-Speed");
         Directory.CreateDirectory(dlDir);
+        _downloadDir = dlDir;
         _downloadEngine = new RynDownloadEngine(_eventBus, dlDir);
+        var storePath = Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+            "RYN-AI-Speed",
+            "downloads.bin");
+        _downloads = new DownloadManager(_downloadEngine, storePath);
+        DownloadsGrid.ItemsSource = _rows;
+        SpeedLimitCombo.SelectionChanged += SpeedLimitCombo_Changed;
+        CategoryList.SelectionChanged += (_, _) => RefreshRows();
+        Activated += Window_Activated;
+        _uiTimer.Tick += (_, _) => RefreshRows();
+        _uiTimer.Start();
+        RefreshRows();
         AiChatList.Items.Add("RYN AI: أهلاً بك! اكتب «افحص الإنترنت» أو «ليش التنزيل بطيء؟» للتشخيص المحلي الفوري.");
     }
 
@@ -40,32 +62,140 @@ public partial class MainWindow : Window
         }
     }
 
-    private async void DownloadBtn_Click(object sender, RoutedEventArgs e)
+    private void AddBtn_Click(object sender, RoutedEventArgs e) => AddFromBox();
+
+    private void DownloadUrlBox_KeyDown(object sender, System.Windows.Input.KeyEventArgs e)
+    {
+        if (e.Key == System.Windows.Input.Key.Enter) AddFromBox();
+    }
+
+    private void AddFromBox()
     {
         var url = DownloadUrlBox.Text.Trim();
         if (string.IsNullOrWhiteSpace(url) || url == "https://") return;
+        if (!Uri.TryCreate(url, UriKind.Absolute, out var uri) || (uri.Scheme != Uri.UriSchemeHttp && uri.Scheme != Uri.UriSchemeHttps))
+        {
+            StatusBannerText.Text = "الرابط غير صالح (يجب أن يبدأ بـ http أو https)";
+            return;
+        }
 
-        DownloadBtn.IsEnabled = false;
-        DownloadsLogList.Items.Add($"[بدء] جاري فحص وتنزيل: {url}");
-        StatusBannerText.Text = "جاري التنزيل متعدد الاتصالات...";
+        _downloads.Add(url, speedLimitBps: 0L);
+        DownloadUrlBox.Text = "https://";
+        StatusBannerText.Text = "تمت إضافة التنزيل";
+        RefreshRows();
+    }
+
+    private DownloadRow? SelectedRow() => DownloadsGrid.SelectedItem as DownloadRow;
+
+    private void PauseBtn_Click(object sender, RoutedEventArgs e)
+    {
+        if (SelectedRow() is { } row) _downloads.Pause(row.Id);
+    }
+
+    private void ResumeBtn_Click(object sender, RoutedEventArgs e)
+    {
+        if (SelectedRow() is { } row) _downloads.Resume(row.Id);
+    }
+
+    private void CancelBtn_Click(object sender, RoutedEventArgs e)
+    {
+        if (SelectedRow() is { } row) _downloads.Cancel(row.Id);
+    }
+
+    private void RemoveBtn_Click(object sender, RoutedEventArgs e)
+    {
+        if (SelectedRow() is not { } row) return;
+        var deleteFile = false;
+        if (row.RawStatus == "COMPLETED")
+        {
+            var answer = MessageBox.Show(
+                "حذف الملف من القرص أيضاً؟\n(نعم = احذف الملف، لا = احذفه من القائمة فقط)",
+                "حذف",
+                MessageBoxButton.YesNoCancel,
+                MessageBoxImage.Question);
+            if (answer == MessageBoxResult.Cancel) return;
+            deleteFile = answer == MessageBoxResult.Yes;
+        }
+        _downloads.Remove(row.Id, deleteFile);
+        RefreshRows();
+    }
+
+    private void OpenFolderBtn_Click(object sender, RoutedEventArgs e)
+    {
+        var path = SelectedRow()?.FinalPath;
+        if (!string.IsNullOrEmpty(path) && File.Exists(path))
+            Process.Start(new ProcessStartInfo("explorer.exe", $"/select,\"{path}\"") { UseShellExecute = true });
+        else
+            Process.Start(new ProcessStartInfo(_downloadDir) { UseShellExecute = true });
+    }
+
+    private void SpeedLimitCombo_Changed(object sender, SelectionChangedEventArgs e)
+    {
+        long[] limits = [0L, 512L * 1024L, 1024L * 1024L, 5L * 1024L * 1024L, 10L * 1024L * 1024L];
+        var index = SpeedLimitCombo.SelectedIndex;
+        _downloads.SetGlobalSpeedLimit(index >= 0 && index < limits.Length ? limits[index] : 0L);
+    }
+
+    private void Window_Activated(object? sender, EventArgs e)
+    {
+        // IDM-style: pick up a copied link automatically.
         try
         {
-            var res = await _downloadEngine.DownloadAsync(url);
-            if (res.IsSuccess)
+            if (!Clipboard.ContainsText()) return;
+            var text = Clipboard.GetText().Trim();
+            var boxIsEmpty = string.IsNullOrEmpty(DownloadUrlBox.Text) || DownloadUrlBox.Text == "https://";
+            if (boxIsEmpty && text != _lastClipboardUrl && !text.Contains(' ', StringComparison.Ordinal) &&
+                (text.StartsWith("http://", StringComparison.OrdinalIgnoreCase) || text.StartsWith("https://", StringComparison.OrdinalIgnoreCase)))
             {
-                DownloadsLogList.Items.Add($"[مكتمل] {res.Value.FilePath} (SHA-256: {res.Value.Sha256[..12]}...)");
-                StatusBannerText.Text = "اكتمل التنزيل وتم التحقق من SHA-256 بنجاح";
-            }
-            else
-            {
-                DownloadsLogList.Items.Add($"[خطأ] {res.ErrorCode}: {res.ErrorMessage}");
-                StatusBannerText.Text = $"فشل التنزيل: {res.ErrorCode}";
+                _lastClipboardUrl = text;
+                DownloadUrlBox.Text = text;
+                StatusBannerText.Text = "تم التقاط رابط من الحافظة. اضغط إضافة";
             }
         }
-        finally
+        catch (System.Runtime.InteropServices.ExternalException)
         {
-            DownloadBtn.IsEnabled = true;
+            // the clipboard is briefly locked by another app; try again on the next activation
         }
+    }
+
+    private static bool Passes(string filter, DownloadJob job) => filter switch
+    {
+        "ALL" => true,
+        "ACTIVE" => job.Status is "DOWNLOADING" or "QUEUED",
+        "DONE" => job.Status == "COMPLETED",
+        "STOPPED" => job.Status is "PAUSED" or "FAILED" or "CANCELED",
+        _ => job.Category == filter
+    };
+
+    private void RefreshRows()
+    {
+        var jobs = _downloads.Snapshot();
+        var filter = (CategoryList.SelectedItem as ListBoxItem)?.Tag as string ?? "ALL";
+        var visible = jobs.Where(j => Passes(filter, j)).ToList();
+
+        for (var i = _rows.Count - 1; i >= 0; i--)
+        {
+            var id = _rows[i].Id;
+            if (!visible.Any(j => j.Id == id)) _rows.RemoveAt(i);
+        }
+
+        foreach (var job in visible)
+        {
+            var row = _rows.FirstOrDefault(r => r.Id == job.Id);
+            if (row is null)
+            {
+                row = new DownloadRow(job.Id);
+                _rows.Insert(0, row);
+            }
+            row.Update(job);
+        }
+
+        var active = jobs.Count(j => j.Status is "DOWNLOADING" or "QUEUED");
+        var done = jobs.Count(j => j.Status == "COMPLETED");
+        var totalSpeed = _rows.Sum(r => r.SpeedBps);
+        DownloadsStatusText.Text = jobs.Count == 0
+            ? "لا توجد تنزيلات بعد. الصق رابطاً واضغط إضافة."
+            : $"{active} قيد التنزيل  •  {done} مكتمل  •  السرعة الكلية: {Fmt.Bytes(totalSpeed)}/s";
     }
 
     private async void RunNetTestBtn_Click(object sender, RoutedEventArgs e)
@@ -120,6 +250,8 @@ public partial class MainWindow : Window
 
     protected override void OnClosed(EventArgs e)
     {
+        _uiTimer.Stop();
+        _downloads.Dispose(); // pauses running downloads and writes their final checkpoint
         _downloadEngine.Dispose();
         _networkOptimizer.Dispose();
         base.OnClosed(e);

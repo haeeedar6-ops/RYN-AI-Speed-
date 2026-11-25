@@ -4,8 +4,12 @@
     <TargetFramework>net10.0-windows10.0.22621.0</TargetFramework>
     <RootNamespace>RynSpeed.App</RootNamespace>
     <UseWPF>true</UseWPF>
+    <ApplicationIcon>ryn.ico</ApplicationIcon>
     <PublishSingleFile>false</PublishSingleFile>
   </PropertyGroup>
+  <ItemGroup>
+    <Resource Include="ryn.ico" />
+  </ItemGroup>
   <ItemGroup>
     <ProjectReference Include="..\RynSpeed.Core\RynSpeed.Core.csproj" />
     <ProjectReference Include="..\RynSpeed.Security\RynSpeed.Security.csproj" />

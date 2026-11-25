@@ -90,6 +90,15 @@ public sealed class SegmentCoordinator
         _nextIndex = _segments.Count;
     }
 
+    /// <summary>Consistent copy of all segments (used for checkpoints).</summary>
+    public List<ActiveSegment> Snapshot()
+    {
+        lock (_sync)
+        {
+            return [.. _segments];
+        }
+    }
+
     public ActiveSegment? StealWorkOrNull()
     {
         lock (_sync)
@@ -179,12 +188,21 @@ public sealed class SparseFileWriter : IDisposable
 
     public void Preallocate(long totalBytes)
     {
+        // Resuming: the file already has its full length, no new space is needed.
+        if (RandomAccess.GetLength(_handle!) == totalBytes) return;
+
         var root = Path.GetPathRoot(_tempPath) ?? _tempPath;
         var drive = new DriveInfo(root);
         if (drive.AvailableFreeSpace < totalBytes + DownloadPolicy.DiskSafetyBufferBytes)
             throw new IOException($"INSUFFICIENT_DISK_SPACE: Need {totalBytes + DownloadPolicy.DiskSafetyBufferBytes}, free {drive.AvailableFreeSpace}");
 
         RandomAccess.SetLength(_handle!, totalBytes);
+    }
+
+    /// <summary>Pushes written data to disk so a checkpoint never claims more than the file really holds.</summary>
+    public void FlushToDisk()
+    {
+        if (_handle is not null) RandomAccess.FlushToDisk(_handle);
     }
 
     public ValueTask WriteAtAsync(long offset, ReadOnlyMemory<byte> buffer, CancellationToken ct) =>

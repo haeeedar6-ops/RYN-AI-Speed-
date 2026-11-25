@@ -52,3 +52,9 @@ Fix: `app/build.gradle.kts` now signs release with the secret keystore when pres
 - **AI chat (Gemini-style)**: real Gemini API (key stored encrypted, header auth), history, Markdown bold/bullets, suggestion chips; works offline-lite without a key.
 - **Browser**: smart address bar (URL or search), back/forward/reload/home/clear, progress bar, back-button support, HTTPS only, permission prompts denied.
 - Tests added: WireGuard parser/countries/trace parser, browser input.
+
+## Round 7 - Windows: IDM-style download manager
+- Engine: `RunJobAsync` = resumable job (checkpoint every second, flush-before-record), restores segments, restarts safely if size/ETag/Last-Modified changed, first failing worker cancels siblings.
+- `DownloadManager`: add / pause / resume / cancel / remove, max 3 parallel downloads (queue), list saved encrypted with Windows DPAPI (current user), anything unfinished becomes "paused" after a restart, closing the app pauses running downloads and writes the final checkpoint.
+- UI: IDM-like grid (name, size, progress bar, speed, ETA, status), categories sidebar, toolbar (pause/resume/cancel/remove/open folder), speed limit, link auto-picked from the clipboard, new app icon.
+- Still TODO on Windows (next rounds): system-tray/background mode + start with Windows, browser extension capture, VPN (WireGuard) tab, Gemini chat, Proton-style restyle of the other tabs.
