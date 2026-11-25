@@ -57,6 +57,22 @@ class KeystoreKeyManager(private val context: Context) {
         return keyGenerator.generateKey()
     }
 
+    /** Encrypts arbitrary bytes with the hardware-backed master key. Output = [ivLength][iv][cipherText]. */
+    fun seal(plain: ByteArray): ByteArray {
+        val (cipherText, iv) = encrypt(plain)
+        return byteArrayOf(iv.size.toByte()) + iv + cipherText
+    }
+
+    /** Reverses [seal]. Throws if the blob is corrupted or was sealed with another key. */
+    fun unseal(blob: ByteArray): ByteArray {
+        require(blob.size > 1) { "Sealed blob is empty" }
+        val ivLength = blob[0].toInt() and 0xFF
+        require(blob.size > 1 + ivLength) { "Sealed blob is truncated" }
+        val iv = blob.copyOfRange(1, 1 + ivLength)
+        val cipherText = blob.copyOfRange(1 + ivLength, blob.size)
+        return decrypt(cipherText, iv)
+    }
+
     private fun encrypt(plainBytes: ByteArray): Pair<ByteArray, ByteArray> {
         val cipher = Cipher.getInstance(TRANSFORMATION)
         cipher.init(Cipher.ENCRYPT_MODE, getOrCreateMasterKey())

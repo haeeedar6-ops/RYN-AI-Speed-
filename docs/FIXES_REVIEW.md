@@ -44,3 +44,11 @@ Ran: backend unit tests (19), root security audit + integration suites (10), `va
 ## Round 5 - APK "package appears invalid"
 Cause: the release APK was **unsigned** (`app-release-unsigned.apk`); Android refuses to install unsigned APKs. The workflow decoded a keystore but Gradle never used it.
 Fix: `app/build.gradle.kts` now signs release with the secret keystore when present, otherwise with the debug key (always installable). Install `app-debug.apk` / `app-release.apk`, never `*-unsigned.apk`.
+
+## Round 6 - New UI, real WireGuard VPN, Gemini chat, better browser, new icon
+- **Icon**: adaptive icon (black circle + green robot) as vector, theme + splash colours.
+- **VPN (Proton-style)**: status hero, Quick Connect (auto: tries servers until one really works), countries with flags, per-server connect/delete, import of WireGuard `.conf` files (strictly validated, stored encrypted with Android Keystore), real WireGuard backend (`com.wireguard.android:tunnel`), "connected" only after a real request through the tunnel succeeds (shows exit IP + country), link to Android's Always-on/Block-without-VPN kill switch.
+  Multiple countries need real servers: import files from a provider (e.g. Mullvad) or your own servers. Name files `us-nyc.conf`, `se-sto.conf`... to get the flag.
+- **AI chat (Gemini-style)**: real Gemini API (key stored encrypted, header auth), history, Markdown bold/bullets, suggestion chips; works offline-lite without a key.
+- **Browser**: smart address bar (URL or search), back/forward/reload/home/clear, progress bar, back-button support, HTTPS only, permission prompts denied.
+- Tests added: WireGuard parser/countries/trace parser, browser input.

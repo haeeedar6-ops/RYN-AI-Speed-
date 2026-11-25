@@ -52,14 +52,15 @@ import com.ryn.aispeed.core.common.RynResult
 import com.ryn.aispeed.core.database.DownloadDao
 import com.ryn.aispeed.core.database.DownloadEntity
 import com.ryn.aispeed.feature.ai.AiAutoManager
-import com.ryn.aispeed.feature.ai.LocalAiRulesEngine
 import com.ryn.aispeed.feature.browser.ExternalLinkExtractor
-import com.ryn.aispeed.feature.browser.HardenedWebViewConfigurator
 import com.ryn.aispeed.feature.downloads.engine.RynDownloadEngine
 import com.ryn.aispeed.feature.downloads.ui.DownloadManagerScreen
 import com.ryn.aispeed.feature.network.DnsBenchmarkEntry
 import com.ryn.aispeed.feature.network.LatencyReport
 import com.ryn.aispeed.feature.network.RynNetworkOptimizer
+import com.ryn.aispeed.ui.RynBrowserScreen
+import com.ryn.aispeed.ui.RynChatScreen
+import com.ryn.aispeed.ui.VpnScreen
 import dagger.hilt.android.AndroidEntryPoint
 import kotlinx.coroutines.launch
 import java.io.File
@@ -87,7 +88,7 @@ class MainActivity : ComponentActivity() {
     private lateinit var downloadEngine: RynDownloadEngine
 
     private var sharedUrlState = mutableStateOf<String?>(null)
-    private var vpnPermissionStatus = mutableStateOf("جاهز (يتطلب إعداد سيرفر WireGuard)")
+    private var vpnPermissionStatus = mutableStateOf("افتح تبويب VPN لإضافة سيرفراتك والاتصال")
 
     private val vpnPermissionLauncher = registerForActivityResult(
         ActivityResultContracts.StartActivityForResult()
@@ -256,7 +257,7 @@ private fun RynMainAppShell(
                     }
                 )
 
-                2 -> BuiltInBrowserTab(
+                2 -> RynBrowserScreen(
                     onDownloadIntercepted = { url ->
                         selectedTab = 1
                         scope.launch {
@@ -266,11 +267,10 @@ private fun RynMainAppShell(
                     }
                 )
 
-                3 -> NetworkAndVpnTab(
+                3 -> VpnScreen(
                     lastLatency = lastLatency,
                     dnsEntries = dnsEntries,
                     isTesting = isTestingNetwork,
-                    vpnStatusText = vpnStatusText,
                     onRunDiagnostics = {
                         if (!isTestingNetwork) {
                             scope.launch {
@@ -282,11 +282,10 @@ private fun RynMainAppShell(
                                 isTestingNetwork = false
                             }
                         }
-                    },
-                    onRequestVpnPermission = onRequestVpnPermission
+                    }
                 )
 
-                4 -> AiAssistantTab(lastLatency = lastLatency)
+                4 -> RynChatScreen(lastLatency = lastLatency)
             }
         }
     }
@@ -369,193 +368,6 @@ private fun HomeDashboardTab(
         }
     }
 }
-
-@Composable
-private fun BuiltInBrowserTab(onDownloadIntercepted: (String) -> Unit) {
-    var addressInput by remember { mutableStateOf("https://duckduckgo.com") }
-    var currentUrl by remember { mutableStateOf("https://duckduckgo.com") }
-    var webViewRef by remember { mutableStateOf<WebView?>(null) }
-
-    Column(modifier = Modifier.fillMaxSize()) {
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .background(Color(0xFF111A1E))
-                .padding(8.dp),
-            horizontalArrangement = Arrangement.spacedBy(6.dp),
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            OutlinedTextField(
-                value = addressInput,
-                onValueChange = { addressInput = it },
-                singleLine = true,
-                modifier = Modifier.weight(1f)
-            )
-            Button(
-                onClick = {
-                    val trimmed = addressInput.trim()
-                    val normalized = if (trimmed.startsWith("http://") || trimmed.startsWith("https://")) trimmed else "https://$trimmed"
-                    currentUrl = normalized
-                    webViewRef?.loadUrl(normalized)
-                },
-                colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF10B981))
-            ) {
-                Text("فتح", color = Color(0xFF041C14))
-            }
-            OutlinedButton(onClick = { HardenedWebViewConfigurator.wipeAllBrowsingData(webViewRef) }) {
-                Text("مسح", color = Color(0xFF10B981))
-            }
-        }
-
-        AndroidView(
-            modifier = Modifier.fillMaxSize(),
-            factory = { ctx ->
-                WebView(ctx).apply {
-                    HardenedWebViewConfigurator.applySecuritySettings(this)
-                    webViewClient = HardenedWebViewConfigurator.createHardenedWebViewClient(
-                        onPageChanged = { url, _ -> addressInput = url },
-                        onBlockedDangerousUrl = {}
-                    )
-                    HardenedWebViewConfigurator.attachDownloadInterceptor(this) { dl ->
-                        if (dl.canEngineHandle) onDownloadIntercepted(dl.url)
-                    }
-                    loadUrl(currentUrl)
-                    webViewRef = this
-                }
-            }
-        )
-    }
-}
-
-@Composable
-private fun NetworkAndVpnTab(
-    lastLatency: LatencyReport?,
-    dnsEntries: List<DnsBenchmarkEntry>,
-    isTesting: Boolean,
-    vpnStatusText: String,
-    onRunDiagnostics: () -> Unit,
-    onRequestVpnPermission: () -> Unit
-) {
-    LazyColumn(
-        modifier = Modifier
-            .fillMaxSize()
-            .padding(16.dp),
-        verticalArrangement = Arrangement.spacedBy(12.dp)
-    ) {
-        item {
-            Text("تشخيص الشبكة و VPN", style = MaterialTheme.typography.headlineSmall, color = Color(0xFF10B981), fontWeight = FontWeight.Bold)
-        }
-        item {
-            Button(
-                onClick = onRunDiagnostics,
-                enabled = !isTesting,
-                colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF10B981)),
-                modifier = Modifier.fillMaxWidth()
-            ) {
-                Text(
-                    if (isTesting) "جاري الفحص الحقيقي..." else "تشغيل فحص Ping و DNS الحقيقي",
-                    color = Color(0xFF041C14),
-                    fontWeight = FontWeight.Bold
-                )
-            }
-        }
-        if (lastLatency != null) {
-            item {
-                val ping = lastLatency.avgPingMs
-                val jitter = lastLatency.jitterMs
-                Card(colors = CardDefaults.cardColors(containerColor = Color(0xFF111A1E)), modifier = Modifier.fillMaxWidth()) {
-                    Column(modifier = Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                        Text("الهدف: ${lastLatency.host}:${lastLatency.port}", color = Color(0xFF10B981), fontWeight = FontWeight.Bold)
-                        Text("Ping: ${ping?.toInt() ?: -1} ms • Jitter: ${jitter?.toInt() ?: 0} ms", color = Color(0xFFECFDF5))
-                        Text("فقدان الحزم: ${lastLatency.packetLossPct.toInt()}%", color = Color(0xFFD1FAE5))
-                    }
-                }
-            }
-        }
-        items(dnsEntries) { entry ->
-            val ms = entry.avgLatencyMs
-            Card(colors = CardDefaults.cardColors(containerColor = Color(0xFF111A1E)), modifier = Modifier.fillMaxWidth()) {
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(12.dp),
-                    horizontalArrangement = Arrangement.SpaceBetween
-                ) {
-                    Text("${entry.name} (${entry.resolverIp})", color = Color(0xFFECFDF5))
-                    Text(
-                        if (entry.reachable && ms != null) "${ms.toInt()} ms" else "غير متاح",
-                        color = if (entry.reachable) Color(0xFF10B981) else Color(0xFFEF4444)
-                    )
-                }
-            }
-        }
-        item {
-            Card(colors = CardDefaults.cardColors(containerColor = Color(0xFF111A1E)), modifier = Modifier.fillMaxWidth()) {
-                Column(modifier = Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Text("حماية WireGuard VPN + Kill Switch", color = Color(0xFF10B981), fontWeight = FontWeight.Bold)
-                    Text(vpnStatusText, color = Color(0xFFECFDF5))
-                    OutlinedButton(onClick = onRequestVpnPermission, modifier = Modifier.fillMaxWidth()) {
-                        Text("تفعيل صلاحية VpnService للنظام", color = Color(0xFF10B981))
-                    }
-                }
-            }
-        }
-    }
-}
-
-@Composable
-private fun AiAssistantTab(lastLatency: LatencyReport?) {
-    val messages = remember {
-        mutableStateListOf("RYN AI: أهلاً بك! اكتب «افحص الإنترنت» أو «ليش التنزيل بطيء؟» للتشخيص المحلي الفوري.")
-    }
-    var input by remember { mutableStateOf("") }
-
-    Column(
-        modifier = Modifier
-            .fillMaxSize()
-            .padding(16.dp),
-        verticalArrangement = Arrangement.spacedBy(10.dp)
-    ) {
-        Text("مساعد RYN الذكي (محلي Offline)", style = MaterialTheme.typography.headlineSmall, color = Color(0xFF10B981), fontWeight = FontWeight.Bold)
-
-        LazyColumn(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-            items(messages) { msg ->
-                Card(colors = CardDefaults.cardColors(containerColor = Color(0xFF111A1E)), modifier = Modifier.fillMaxWidth()) {
-                    Text(msg, color = Color(0xFFECFDF5), modifier = Modifier.padding(12.dp))
-                }
-            }
-        }
-
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
-            OutlinedTextField(
-                value = input,
-                onValueChange = { input = it },
-                placeholder = { Text("اكتب أمرك هنا...") },
-                singleLine = true,
-                modifier = Modifier.weight(1f)
-            )
-            Button(
-                onClick = {
-                    val q = input.trim()
-                    if (q.isNotEmpty()) {
-                        messages.add("أنت: $q")
-                        val diag = LocalAiRulesEngine.diagnoseNetworkOffline(
-                            pingMs = lastLatency?.avgPingMs,
-                            jitterMs = lastLatency?.jitterMs,
-                            packetLossPct = lastLatency?.packetLossPct ?: 0.0
-                        )
-                        messages.add("RYN AI: ${diag.titleAr} — التوصية: ${diag.recommendedConnections} اتصالات تنزيل. (${diag.suggestedAction})")
-                        input = ""
-                    }
-                },
-                colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF10B981))
-            ) {
-                Text("إرسال", color = Color(0xFF041C14), fontWeight = FontWeight.Bold)
-            }
-        }
-    }
-}
-
 
 /** One download engine for the whole process (survives Activity re-creation). */
 private object DownloadEngineHolder {
