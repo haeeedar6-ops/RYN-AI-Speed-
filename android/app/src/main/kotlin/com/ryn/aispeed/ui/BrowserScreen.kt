@@ -50,6 +50,7 @@ object BrowserInput {
 
 @Composable
 fun RynBrowserScreen(onDownloadIntercepted: (String) -> Unit) {
+    val str = LocalStrings.current
     var addressInput by remember { mutableStateOf("") }
     var progress by remember { mutableIntStateOf(0) }
     var canBack by remember { mutableStateOf(false) }
@@ -70,7 +71,7 @@ fun RynBrowserScreen(onDownloadIntercepted: (String) -> Unit) {
             onValueChange = { addressInput = it },
             singleLine = true,
             shape = RoundedCornerShape(24.dp),
-            placeholder = { Text("ابحث أو اكتب عنوان موقع") },
+            placeholder = { Text(str.browserPlaceholder) },
             keyboardOptions = KeyboardOptions(imeAction = ImeAction.Go),
             keyboardActions = KeyboardActions(onGo = { webViewRef?.loadUrl(BrowserInput.resolve(addressInput)) }),
             modifier = Modifier

@@ -57,15 +57,9 @@ import kotlinx.coroutines.launch
 private const val KEY_API = "gemini_api_key"
 private const val KEY_MODEL = "gemini_model"
 
-private val SUGGESTIONS = listOf(
-    "افحص الإنترنت عندي",
-    "ليش التنزيل بطيء؟",
-    "اشرحلي كيف يشتغل الـVPN",
-    "اكتب لي رسالة قصيرة بالعربي"
-)
-
 @Composable
 fun RynChatScreen(lastLatency: LatencyReport?) {
+    val str = LocalStrings.current
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     val store = remember { SecureStringStore(context, KeystoreKeyManager(context.applicationContext)) }
@@ -90,7 +84,7 @@ fun RynChatScreen(lastLatency: LatencyReport?) {
             ""
         }
         return "أنت «RYN AI» مساعد ذكي داخل تطبيق RYN-AI-Speed (مدير تنزيلات + VPN + متصفح). " +
-            "أجب بنفس لغة المستخدم، وبالعربية البسيطة افتراضياً، بإيجاز ووضوح. $net"
+            "أجب بنفس لغة المستخدم، وبـ${str.promptLanguage} افتراضياً، بإيجاز ووضوح. $net"
     }
 
     fun send(raw: String) {
@@ -104,13 +98,7 @@ fun RynChatScreen(lastLatency: LatencyReport?) {
                 jitterMs = lastLatency?.jitterMs,
                 packetLossPct = lastLatency?.packetLossPct ?: 0.0
             )
-            messages.add(
-                ChatTurn(
-                    false,
-                    "${diag.titleAr}\nالتوصية: ${diag.recommendedConnections} اتصالات تنزيل.\n\n" +
-                        "💡 لتفعيل الدردشة الذكية الكاملة أضف مفتاح Gemini المجاني من زر ⚙ بالأعلى."
-                )
-            )
+            messages.add(ChatTurn(false, str.chatOfflineReply(diag.titleAr, diag.recommendedConnections)))
             return
         }
         busy = true
@@ -154,10 +142,10 @@ fun RynChatScreen(lastLatency: LatencyReport?) {
                     .padding(20.dp),
                 verticalArrangement = Arrangement.Center
             ) {
-                Text("مرحباً 👋", color = RynColors.Accent, fontSize = 34.sp, fontWeight = FontWeight.Bold)
-                Text("كيف أقدر أساعدك اليوم؟", color = RynColors.Muted, fontSize = 24.sp)
+                Text(str.chatGreeting1, color = RynColors.Accent, fontSize = 34.sp, fontWeight = FontWeight.Bold)
+                Text(str.chatGreeting2, color = RynColors.Muted, fontSize = 24.sp)
                 Spacer(Modifier.height(24.dp))
-                SUGGESTIONS.forEach { s ->
+                str.chatSuggestions.forEach { s ->
                     Box(
                         modifier = Modifier
                             .padding(vertical = 5.dp)
@@ -168,7 +156,7 @@ fun RynChatScreen(lastLatency: LatencyReport?) {
                 }
                 if (apiKey.isBlank()) {
                     Spacer(Modifier.height(16.dp))
-                    Text("بدون مفتاح Gemini الردود محلية ومحدودة. أضفه من ⚙", color = RynColors.Warn, fontSize = 13.sp)
+                    Text(str.chatNoKeyBanner, color = RynColors.Warn, fontSize = 13.sp)
                 }
             }
         } else {
@@ -198,7 +186,7 @@ fun RynChatScreen(lastLatency: LatencyReport?) {
                     }
                 }
                 if (busy) {
-                    item { Text("✦ جاري الكتابة...", color = RynColors.Muted) }
+                    item { Text(str.chatTyping, color = RynColors.Muted) }
                 }
             }
         }
@@ -213,7 +201,7 @@ fun RynChatScreen(lastLatency: LatencyReport?) {
             OutlinedTextField(
                 value = input,
                 onValueChange = { input = it },
-                placeholder = { Text("اسأل RYN AI") },
+                placeholder = { Text(str.chatPlaceholder) },
                 shape = RoundedCornerShape(28.dp),
                 maxLines = 4,
                 modifier = Modifier.weight(1f)
@@ -234,21 +222,21 @@ fun RynChatScreen(lastLatency: LatencyReport?) {
         var modelDraft by remember { mutableStateOf(model) }
         AlertDialog(
             onDismissRequest = { showSettings = false },
-            title = { Text("إعدادات Gemini") },
+            title = { Text(str.chatSettingsTitle) },
             text = {
                 Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                    Text("احصل على مفتاح مجاني من aistudio.google.com ثم الصقه هنا. يُحفظ مشفراً على جهازك فقط.", fontSize = 13.sp)
+                    Text(str.chatKeyHelp, fontSize = 13.sp)
                     OutlinedTextField(
                         value = keyDraft,
                         onValueChange = { keyDraft = it.trim() },
-                        label = { Text("Gemini API key") },
+                        label = { Text(str.chatKeyLabel) },
                         singleLine = true,
                         visualTransformation = PasswordVisualTransformation()
                     )
                     OutlinedTextField(
                         value = modelDraft,
                         onValueChange = { modelDraft = it.trim() },
-                        label = { Text("النموذج") },
+                        label = { Text(str.chatModelLabel) },
                         singleLine = true
                     )
                 }
@@ -260,9 +248,9 @@ fun RynChatScreen(lastLatency: LatencyReport?) {
                     if (keyDraft.isBlank()) store.remove(KEY_API) else store.put(KEY_API, keyDraft)
                     store.put(KEY_MODEL, model)
                     showSettings = false
-                }) { Text("حفظ") }
+                }) { Text(str.save) }
             },
-            dismissButton = { TextButton(onClick = { showSettings = false }) { Text("إلغاء") } }
+            dismissButton = { TextButton(onClick = { showSettings = false }) { Text(str.cancel) } }
         )
     }
 }

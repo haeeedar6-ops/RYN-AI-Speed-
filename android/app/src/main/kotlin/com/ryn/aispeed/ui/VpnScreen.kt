@@ -47,8 +47,6 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import com.ryn.aispeed.feature.network.DnsBenchmarkEntry
-import com.ryn.aispeed.feature.network.LatencyReport
 import com.ryn.aispeed.feature.vpn.CountryCatalog
 import com.ryn.aispeed.feature.vpn.VpnProfile
 import com.ryn.aispeed.feature.vpn.VpnUiState
@@ -71,12 +69,8 @@ private fun readImportedFile(context: Context, uri: Uri): Pair<String, String> {
 }
 
 @Composable
-fun VpnScreen(
-    lastLatency: LatencyReport?,
-    dnsEntries: List<DnsBenchmarkEntry>,
-    isTesting: Boolean,
-    onRunDiagnostics: () -> Unit
-) {
+fun VpnScreen() {
+    val str = LocalStrings.current
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     val stack = remember { VpnRuntime.get(context) }
@@ -89,7 +83,7 @@ fun VpnScreen(
     val permissionLauncher = rememberLauncherForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
         val action = pendingAction
         pendingAction = null
-        if (result.resultCode == Activity.RESULT_OK) action?.invoke() else message = "تم رفض صلاحية VPN من النظام"
+        if (result.resultCode == Activity.RESULT_OK) action?.invoke() else message = str.vpnPermissionDenied
     }
 
     fun withVpnPermission(action: () -> Unit) {
@@ -119,9 +113,9 @@ fun VpnScreen(
             }
             profiles = stack.store.list()
             message = when {
-                errors.isEmpty() -> "تمت إضافة $imported سيرفر"
-                imported == 0 -> "فشل الاستيراد: ${errors.first()}"
-                else -> "تمت إضافة $imported وفشل ${errors.size}: ${errors.first()}"
+                errors.isEmpty() -> str.vpnImported(imported)
+                imported == 0 -> str.vpnImportFailed(errors.first())
+                else -> str.vpnImportPartial(imported, errors.size, errors.first())
             }
         }
     }
@@ -142,13 +136,13 @@ fun VpnScreen(
         item {
             val (title, subtitle, color) = when (val s = state) {
                 is VpnUiState.Connected -> Triple(
-                    "محمي",
+                    str.vpnProtected,
                     "${CountryCatalog.flagEmoji(s.countryCode)} ${s.name}  •  IP: ${s.ip ?: "—"}",
                     RynColors.Accent
                 )
-                is VpnUiState.Connecting -> Triple("جاري الاتصال...", s.label, RynColors.Warn)
-                is VpnUiState.Failed -> Triple("فشل الاتصال", s.message, RynColors.Danger)
-                VpnUiState.Disconnected -> Triple("غير محمي", "اتصالك مكشوف. اضغط اتصال سريع", RynColors.Danger)
+                is VpnUiState.Connecting -> Triple(str.vpnConnectingTitle, s.label, RynColors.Warn)
+                is VpnUiState.Failed -> Triple(str.vpnFailedTitle, s.message, RynColors.Danger)
+                VpnUiState.Disconnected -> Triple(str.vpnUnprotected, str.vpnUnprotectedSub, RynColors.Danger)
             }
             Card(
                 colors = CardDefaults.cardColors(containerColor = RynColors.Card),
@@ -176,7 +170,7 @@ fun VpnScreen(
                     val s = state
                     if (s is VpnUiState.Connected) {
                         val exit = s.exitCountry?.let { "${CountryCatalog.flagEmoji(it)} ${CountryCatalog.nameAr(it)}" } ?: "—"
-                        Text("الخروج من: $exit  •  زمن التحقق: ${s.latencyMs ?: 0} ms", color = RynColors.Text)
+                        Text(str.vpnExit(exit, s.latencyMs ?: 0L), color = RynColors.Text)
                         s.warning?.let { Text(it, color = RynColors.Warn) }
                     }
                 }
@@ -190,7 +184,7 @@ fun VpnScreen(
                     if (connected) {
                         scope.launch { stack.controller.disconnect() }
                     } else if (profiles.isEmpty()) {
-                        message = "أضف سيرفرات WireGuard أولاً (زر الإضافة بالأسفل)"
+                        message = str.vpnAddFirst
                     } else {
                         withVpnPermission { scope.launch { stack.controller.connectAuto(profiles) } }
                     }
@@ -204,9 +198,9 @@ fun VpnScreen(
             ) {
                 Text(
                     text = when {
-                        connecting -> "جاري الاتصال..."
-                        connected -> "قطع الاتصال"
-                        else -> "⚡ اتصال سريع (تلقائي)"
+                        connecting -> str.vpnConnectingBtn
+                        connected -> str.vpnDisconnect
+                        else -> str.vpnQuickConnect
                     },
                     color = if (connected) Color.White else RynColors.OnAccent,
                     fontWeight = FontWeight.Bold,
@@ -226,9 +220,9 @@ fun VpnScreen(
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                Text("الدول (${countries.size})", color = RynColors.Text, fontWeight = FontWeight.Bold, fontSize = 18.sp)
+                Text(str.vpnCountries(countries.size), color = RynColors.Text, fontWeight = FontWeight.Bold, fontSize = 18.sp)
                 OutlinedButton(onClick = { importLauncher.launch(arrayOf("*/*")) }) {
-                    Text("＋ إضافة سيرفر (.conf)", color = RynColors.Accent)
+                    Text(str.vpnAddServer, color = RynColors.Accent)
                 }
             }
         }
@@ -237,12 +231,9 @@ fun VpnScreen(
             item {
                 Card(colors = CardDefaults.cardColors(containerColor = RynColors.Card), modifier = Modifier.fillMaxWidth()) {
                     Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                        Text("لا توجد سيرفرات بعد", color = RynColors.Text, fontWeight = FontWeight.Bold)
+                        Text(str.vpnEmptyTitle, color = RynColors.Text, fontWeight = FontWeight.Bold)
                         Text(
-                            "الـVPN يحتاج سيرفرات WireGuard حقيقية بعدة دول. خياراتك: " +
-                                "(1) اشتراك بمزوّد يعطيك ملفات WireGuard مثل Mullvad، أو " +
-                                "(2) سيرفرك الخاص. حمّل ملفات .conf ثم اضغط «إضافة سيرفر». " +
-                                "سمِّ الملف بكود الدولة (us-nyc.conf أو se-sto.conf) ليظهر العلم والاسم.",
+                            str.vpnEmptyBody,
                             color = RynColors.Muted
                         )
                     }
@@ -271,49 +262,15 @@ fun VpnScreen(
         item {
             Card(colors = CardDefaults.cardColors(containerColor = RynColors.Card), modifier = Modifier.fillMaxWidth()) {
                 Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Text("قاطع الاتصال (Kill Switch)", color = RynColors.Text, fontWeight = FontWeight.Bold)
+                    Text(str.vpnKillTitle, color = RynColors.Text, fontWeight = FontWeight.Bold)
                     Text(
-                        "أندرويد يوفّر قاطعاً حقيقياً: فعّل «VPN دائم التشغيل» و«حظر الاتصالات بدون VPN» من إعدادات النظام.",
+                        str.vpnKillBody,
                         color = RynColors.Muted
                     )
                     OutlinedButton(
                         onClick = { context.startActivity(Intent(Settings.ACTION_VPN_SETTINGS)) },
                         modifier = Modifier.fillMaxWidth()
-                    ) { Text("فتح إعدادات VPN في النظام", color = RynColors.Accent) }
-                }
-            }
-        }
-
-        // ---- Diagnostics ----
-        item {
-            Card(colors = CardDefaults.cardColors(containerColor = RynColors.Card), modifier = Modifier.fillMaxWidth()) {
-                Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Text("فحص الشبكة الحقيقي", color = RynColors.Text, fontWeight = FontWeight.Bold)
-                    Button(
-                        onClick = onRunDiagnostics,
-                        enabled = !isTesting,
-                        colors = ButtonDefaults.buttonColors(containerColor = RynColors.Accent),
-                        modifier = Modifier.fillMaxWidth()
-                    ) {
-                        Text(if (isTesting) "جاري الفحص..." else "فحص Ping و DNS", color = RynColors.OnAccent, fontWeight = FontWeight.Bold)
-                    }
-                    if (lastLatency != null) {
-                        val ping = lastLatency.avgPingMs
-                        Text(
-                            "Ping: ${ping?.toInt() ?: -1} ms • Jitter: ${lastLatency.jitterMs?.toInt() ?: 0} ms • فقدان الحزم: ${lastLatency.packetLossPct.toInt()}%",
-                            color = RynColors.Text
-                        )
-                    }
-                    dnsEntries.forEach { entry ->
-                        val ms = entry.avgLatencyMs
-                        Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                            Text("${entry.name} (${entry.resolverIp})", color = RynColors.Text)
-                            Text(
-                                if (entry.reachable && ms != null) "${ms.toInt()} ms" else "غير متاح",
-                                color = if (entry.reachable) RynColors.Accent else RynColors.Danger
-                            )
-                        }
-                    }
+                    ) { Text(str.vpnKillButton, color = RynColors.Accent) }
                 }
             }
         }
@@ -332,6 +289,7 @@ private fun CountryCard(
     onConnect: (VpnProfile) -> Unit,
     onDelete: (VpnProfile) -> Unit
 ) {
+    val str = LocalStrings.current
     Card(
         colors = CardDefaults.cardColors(containerColor = RynColors.Card),
         shape = RoundedCornerShape(16.dp),
@@ -349,13 +307,13 @@ private fun CountryCard(
                 Text(CountryCatalog.flagEmoji(code), fontSize = 28.sp)
                 Column(modifier = Modifier.weight(1f)) {
                     Text(CountryCatalog.nameAr(code), color = RynColors.Text, fontWeight = FontWeight.SemiBold)
-                    Text("${servers.size} سيرفر", color = RynColors.Muted, fontSize = 13.sp)
+                    Text(str.vpnServersCount(servers.size), color = RynColors.Muted, fontSize = 13.sp)
                 }
                 Button(
                     onClick = { onConnect(servers.first()) },
                     enabled = !busy,
                     colors = ButtonDefaults.buttonColors(containerColor = RynColors.Accent)
-                ) { Text("اتصال", color = RynColors.OnAccent, fontWeight = FontWeight.Bold) }
+                ) { Text(str.vpnConnect, color = RynColors.OnAccent, fontWeight = FontWeight.Bold) }
                 Text(if (expanded) "⌃" else "⌄", color = RynColors.Muted, fontSize = 20.sp)
             }
             if (expanded) {
@@ -377,10 +335,10 @@ private fun CountryCard(
                             )
                         }
                         TextButton(onClick = { onConnect(server) }, enabled = !busy) {
-                            Text("اتصال", color = RynColors.Accent)
+                            Text(str.vpnConnect, color = RynColors.Accent)
                         }
                         TextButton(onClick = { onDelete(server) }) {
-                            Text("حذف", color = RynColors.Danger)
+                            Text(str.vpnDelete, color = RynColors.Danger)
                         }
                     }
                 }

@@ -2,6 +2,7 @@ package com.ryn.aispeed
 
 import android.content.Intent
 import android.net.VpnService
+import android.os.Build
 import android.os.Bundle
 import android.os.Environment
 import android.webkit.WebView
@@ -61,6 +62,29 @@ import com.ryn.aispeed.feature.network.RynNetworkOptimizer
 import com.ryn.aispeed.ui.RynBrowserScreen
 import com.ryn.aispeed.ui.RynChatScreen
 import com.ryn.aispeed.ui.VpnScreen
+import androidx.activity.compose.BackHandler
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.width
+import androidx.compose.material3.DrawerValue
+import androidx.compose.material3.ModalDrawerSheet
+import androidx.compose.material3.ModalNavigationDrawer
+import androidx.compose.material3.NavigationDrawerItem
+import androidx.compose.material3.rememberDrawerState
+import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalLayoutDirection
+import androidx.compose.ui.unit.LayoutDirection
+import androidx.compose.ui.unit.sp
+import com.ryn.aispeed.ui.HomeScreen
+import com.ryn.aispeed.ui.NetworkScreen
+import com.ryn.aispeed.ui.SmartCoreScreen
+import com.ryn.aispeed.ui.SettingsScreen
+import com.ryn.aispeed.ui.Section
+import com.ryn.aispeed.ui.LocalStrings
+import com.ryn.aispeed.ui.LanguageStore
+import com.ryn.aispeed.ui.RynStrings
+import com.ryn.aispeed.ui.RynColors
 import dagger.hilt.android.AndroidEntryPoint
 import kotlinx.coroutines.launch
 import java.io.File
@@ -73,7 +97,9 @@ private val RynDarkColorScheme = darkColorScheme(
     background = Color(0xFF0B1114),
     surface = Color(0xFF111A1E),
     onBackground = Color(0xFFECFDF5),
-    onSurface = Color(0xFFD1FAE5)
+    onSurface = Color(0xFFD1FAE5),
+    secondaryContainer = Color(0xFF064E3B),
+    onSecondaryContainer = Color(0xFFECFDF5)
 )
 
 @AndroidEntryPoint
@@ -108,22 +134,44 @@ class MainActivity : ComponentActivity() {
         // One engine per PROCESS (not per Activity): rotating the screen must not create a second engine
         // that cannot see (or pause) the downloads already running.
         downloadEngine = DownloadEngineHolder.get(downloadDao, eventBus, dlRoot)
+        requestNotificationPermissionIfNeeded()
 
         handleIncomingShareIntent(intent)
 
         setContent {
-            MaterialTheme(colorScheme = RynDarkColorScheme) {
-                RynMainAppShell(
-                    downloadDao = downloadDao,
-                    downloadEngine = downloadEngine,
-                    networkOptimizer = networkOptimizer,
-                    aiAutoManager = aiAutoManager,
-                    sharedIncomingUrl = sharedUrlState.value,
-                    onConsumeSharedUrl = { sharedUrlState.value = null },
-                    vpnStatusText = vpnPermissionStatus.value,
-                    onRequestVpnPermission = { requestSystemVpnPermission() }
-                )
+            var lang by remember { mutableStateOf(LanguageStore.load(this@MainActivity)) }
+            val strings = LanguageStore.stringsFor(lang)
+            CompositionLocalProvider(
+                LocalStrings provides strings,
+                LocalLayoutDirection provides (if (strings.isRtl) LayoutDirection.Rtl else LayoutDirection.Ltr)
+            ) {
+                MaterialTheme(colorScheme = RynDarkColorScheme) {
+                    RynMainAppShell(
+                        downloadDao = downloadDao,
+                        downloadEngine = downloadEngine,
+                        networkOptimizer = networkOptimizer,
+                        aiAutoManager = aiAutoManager,
+                        sharedIncomingUrl = sharedUrlState.value,
+                        onConsumeSharedUrl = { sharedUrlState.value = null },
+                        language = lang,
+                        onLanguageChange = { code ->
+                            lang = code
+                            LanguageStore.save(this@MainActivity, code)
+                        }
+                    )
+                }
             }
+        }
+    }
+
+    private val notificationPermissionLauncher =
+        registerForActivityResult(ActivityResultContracts.RequestPermission()) { /* the service works either way */ }
+
+    private fun requestNotificationPermissionIfNeeded() {
+        if (Build.VERSION.SDK_INT >= 33 &&
+            checkSelfPermission(android.Manifest.permission.POST_NOTIFICATIONS) != android.content.pm.PackageManager.PERMISSION_GRANTED
+        ) {
+            notificationPermissionLauncher.launch(android.Manifest.permission.POST_NOTIFICATIONS)
         }
     }
 
@@ -159,211 +207,179 @@ private fun RynMainAppShell(
     aiAutoManager: AiAutoManager,
     sharedIncomingUrl: String?,
     onConsumeSharedUrl: () -> Unit,
-    vpnStatusText: String,
-    onRequestVpnPermission: () -> Unit
+    language: String,
+    onLanguageChange: (String) -> Unit
 ) {
+    val str = LocalStrings.current
+    val appContext = LocalContext.current.applicationContext
     val scope = rememberCoroutineScope()
     val downloads by downloadDao.observeAll().collectAsState(initial = emptyList())
-    var selectedTab by remember { mutableIntStateOf(0) }
-    var statusBanner by remember { mutableStateOf("النواة المشفرة SQLCipher نشطة") }
+    var current by remember { mutableStateOf(Section.HOME) }
+    var statusBanner by remember { mutableStateOf(str.bannerReady) }
     var autoEnabled by remember { mutableStateOf(aiAutoManager.isMasterEnabled()) }
     var lastLatency by remember { mutableStateOf<LatencyReport?>(null) }
     var dnsEntries by remember { mutableStateOf<List<DnsBenchmarkEntry>>(emptyList()) }
     var isTestingNetwork by remember { mutableStateOf(false) }
+    val drawerState = rememberDrawerState(DrawerValue.Closed)
 
     // Side effects must not run during composition (they could fire twice on a retried pass).
     // scope.launch keeps the download alive when the effect key flips to null after consumption.
     LaunchedEffect(sharedIncomingUrl) {
         val urlToStart = sharedIncomingUrl ?: return@LaunchedEffect
-        selectedTab = 1
+        current = Section.DOWNLOADS
         onConsumeSharedUrl()
         scope.launch {
-            statusBanner = "جاري فحص الرابط المشارك..."
-            statusBanner = describeDownloadResult(downloadEngine.startDownload(urlToStart))
+            statusBanner = str.bannerCheckingShared
+            DownloadForegroundService.ensureRunning(appContext)
+            statusBanner = describeDownloadResult(str, downloadEngine.startDownload(urlToStart))
         }
     }
 
-    val tabs = listOf("الرئيسية", "التنزيلات", "المتصفح", "الشبكة/VPN", "RYN AI")
+    BackHandler(enabled = drawerState.isOpen) { scope.launch { drawerState.close() } }
+    BackHandler(enabled = current != Section.HOME && !drawerState.isOpen) { current = Section.HOME }
 
-    Scaffold(
-        containerColor = Color(0xFF0B1114),
-        bottomBar = {
-            NavigationBar(containerColor = Color(0xFF111A1E)) {
-                tabs.forEachIndexed { idx, label ->
-                    NavigationBarItem(
-                        selected = selectedTab == idx,
-                        onClick = { selectedTab = idx },
-                        icon = {
-                            Text(
-                                text = when (idx) {
-                                    0 -> "⚡"
-                                    1 -> "⬇"
-                                    2 -> "🌐"
-                                    3 -> "🛡"
-                                    else -> "🤖"
-                                }
-                            )
+    ModalNavigationDrawer(
+        drawerState = drawerState,
+        drawerContent = {
+            ModalDrawerSheet {
+                Text(
+                    "RYN-AI-Speed",
+                    color = RynColors.Accent,
+                    fontSize = 20.sp,
+                    fontWeight = FontWeight.Bold,
+                    modifier = Modifier.padding(20.dp)
+                )
+                Section.entries.forEach { section ->
+                    NavigationDrawerItem(
+                        label = { Text(section.label(str)) },
+                        icon = { Text(section.icon) },
+                        selected = current == section,
+                        onClick = {
+                            current = section
+                            scope.launch { drawerState.close() }
                         },
-                        label = { Text(label, maxLines = 1) }
+                        modifier = Modifier.padding(horizontal = 12.dp)
                     )
                 }
             }
         }
-    ) { innerPadding ->
-        Column(
-            modifier = Modifier
-                .fillMaxSize()
-                .padding(innerPadding)
-        ) {
-            when (selectedTab) {
-                0 -> HomeDashboardTab(
-                    downloadsCount = downloads.size,
-                    lastLatency = lastLatency,
-                    vpnStatusText = vpnStatusText,
-                    autoEnabled = autoEnabled,
-                    statusBanner = statusBanner,
-                    onToggleAuto = { enabled ->
-                        autoEnabled = enabled
-                        aiAutoManager.setMasterEnabled(enabled)
-                        statusBanner = if (enabled) "المدير التلقائي الذكي مفعّل" else "تم إيقاف المدير التلقائي فوراً"
-                    },
-                    onGoToDownloads = { selectedTab = 1 },
-                    onGoToNetwork = { selectedTab = 3 }
-                )
+    ) {
+        Scaffold(
+            containerColor = RynColors.Bg,
+            topBar = {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .background(RynColors.Card)
+                        .padding(horizontal = 16.dp, vertical = 12.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        "☰",
+                        color = RynColors.Text,
+                        fontSize = 24.sp,
+                        modifier = Modifier.clickable { scope.launch { drawerState.open() } }
+                    )
+                    Spacer(Modifier.width(16.dp))
+                    Text(current.label(str), color = RynColors.Text, fontSize = 18.sp, fontWeight = FontWeight.SemiBold)
+                }
+            }
+        ) { innerPadding ->
+            Column(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .padding(innerPadding)
+            ) {
+                when (current) {
+                    Section.HOME -> HomeScreen(
+                        downloadsCount = downloads.size,
+                        lastLatency = lastLatency,
+                        banner = statusBanner,
+                        autoEnabled = autoEnabled,
+                        onToggleAuto = { enabled ->
+                            autoEnabled = enabled
+                            aiAutoManager.setMasterEnabled(enabled)
+                            statusBanner = if (enabled) str.bannerAutoOn else str.bannerAutoOff
+                        },
+                        onGo = { current = it }
+                    )
 
-                1 -> DownloadManagerScreen(
-                    downloads = downloads,
-                    onAddUrl = { url ->
-                        scope.launch {
-                            statusBanner = "جاري تنزيل الرابط..."
-                            statusBanner = describeDownloadResult(downloadEngine.startDownload(url))
-                        }
-                    },
-                    onPause = { id ->
-                        downloadEngine.pauseDownload(id)
-                        statusBanner = "تم إيقاف التنزيل مؤقتاً"
-                    },
-                    onResume = { id ->
-                        scope.launch {
-                            statusBanner = "جاري استئناف التنزيل..."
-                            statusBanner = describeDownloadResult(downloadEngine.resumeDownload(id))
-                        }
-                    },
-                    onCancel = { id ->
-                        scope.launch {
-                            downloadEngine.cancelDownload(id)
-                            statusBanner = "تم إلغاء التنزيل وحذف الملف المؤقت"
-                        }
-                    }
-                )
-
-                2 -> RynBrowserScreen(
-                    onDownloadIntercepted = { url ->
-                        selectedTab = 1
-                        scope.launch {
-                            statusBanner = "تم التقاط رابط من المتصفح..."
-                            statusBanner = describeDownloadResult(downloadEngine.startDownload(url))
-                        }
-                    }
-                )
-
-                3 -> VpnScreen(
-                    lastLatency = lastLatency,
-                    dnsEntries = dnsEntries,
-                    isTesting = isTestingNetwork,
-                    onRunDiagnostics = {
-                        if (!isTestingNetwork) {
+                    Section.DOWNLOADS -> DownloadManagerScreen(
+                        downloads = downloads,
+                        onAddUrl = { url ->
                             scope.launch {
-                                isTestingNetwork = true
-                                val pingRes = networkOptimizer.measureTcpLatency("1.1.1.1", 443, 5)
-                                if (pingRes is RynResult.Success) lastLatency = pingRes.data
-                                val dnsRes = networkOptimizer.benchmarkDnsResolvers()
-                                if (dnsRes is RynResult.Success) dnsEntries = dnsRes.data
-                                isTestingNetwork = false
+                                statusBanner = str.bannerCheckingShared
+                                DownloadForegroundService.ensureRunning(appContext)
+                                statusBanner = describeDownloadResult(str, downloadEngine.startDownload(url))
+                            }
+                        },
+                        onPause = { id ->
+                            downloadEngine.pauseDownload(id)
+                            statusBanner = str.bannerPaused
+                        },
+                        onResume = { id ->
+                            scope.launch {
+                                statusBanner = str.bannerResuming
+                                DownloadForegroundService.ensureRunning(appContext)
+                                statusBanner = describeDownloadResult(str, downloadEngine.resumeDownload(id))
+                            }
+                        },
+                        onCancel = { id ->
+                            scope.launch {
+                                downloadEngine.cancelDownload(id)
+                                statusBanner = str.bannerCanceled
                             }
                         }
-                    }
-                )
+                    )
 
-                4 -> RynChatScreen(lastLatency = lastLatency)
-            }
-        }
-    }
-}
+                    Section.BROWSER -> RynBrowserScreen(
+                        onDownloadIntercepted = { url ->
+                            current = Section.DOWNLOADS
+                            scope.launch {
+                                statusBanner = str.bannerCaptured
+                                DownloadForegroundService.ensureRunning(appContext)
+                                statusBanner = describeDownloadResult(str, downloadEngine.startDownload(url))
+                            }
+                        }
+                    )
 
-@Composable
-private fun HomeDashboardTab(
-    downloadsCount: Int,
-    lastLatency: LatencyReport?,
-    vpnStatusText: String,
-    autoEnabled: Boolean,
-    statusBanner: String,
-    onToggleAuto: (Boolean) -> Unit,
-    onGoToDownloads: () -> Unit,
-    onGoToNetwork: () -> Unit
-) {
-    Column(
-        modifier = Modifier
-            .fillMaxSize()
-            .padding(16.dp),
-        verticalArrangement = Arrangement.spacedBy(12.dp)
-    ) {
-        Text(
-            text = "RYN-AI-Speed v1.0",
-            style = MaterialTheme.typography.headlineMedium,
-            fontWeight = FontWeight.Bold,
-            color = Color(0xFF10B981)
-        )
-        Text(text = statusBanner, color = Color(0xFF9CA3AF))
+                    Section.NETWORK -> NetworkScreen(
+                        lastLatency = lastLatency,
+                        dnsEntries = dnsEntries,
+                        isTesting = isTestingNetwork,
+                        onRunDiagnostics = {
+                            if (!isTestingNetwork) {
+                                scope.launch {
+                                    isTestingNetwork = true
+                                    val pingRes = networkOptimizer.measureTcpLatency("1.1.1.1", 443, 5)
+                                    if (pingRes is RynResult.Success) lastLatency = pingRes.data
+                                    val dnsRes = networkOptimizer.benchmarkDnsResolvers()
+                                    if (dnsRes is RynResult.Success) dnsEntries = dnsRes.data
+                                    isTestingNetwork = false
+                                }
+                            }
+                        }
+                    )
 
-        Card(
-            colors = CardDefaults.cardColors(containerColor = Color(0xFF111A1E)),
-            shape = RoundedCornerShape(14.dp),
-            modifier = Modifier.fillMaxWidth()
-        ) {
-            Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                Text("حالة الشبكة الحقيقية", color = Color(0xFF10B981), fontWeight = FontWeight.Bold)
-                val pingVal = lastLatency?.avgPingMs
-                Text(
-                    text = if (pingVal != null) "Ping: ${pingVal.toInt()} ms • فقدان الحزم: ${lastLatency.packetLossPct.toInt()}%"
-                    else "اضغط فحص الشبكة لقياس Ping و DNS فعلياً",
-                    color = Color(0xFFECFDF5)
-                )
-                Text(text = "VPN: $vpnStatusText", color = Color(0xFFD1FAE5))
-                Text(text = "سجل التنزيلات المشفر: $downloadsCount ملف", color = Color(0xFFD1FAE5))
-            }
-        }
+                    Section.VPN -> VpnScreen()
 
-        Card(
-            colors = CardDefaults.cardColors(containerColor = Color(0xFF111A1E)),
-            shape = RoundedCornerShape(14.dp),
-            modifier = Modifier.fillMaxWidth()
-        ) {
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(16.dp),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Column(modifier = Modifier.weight(1f)) {
-                    Text("المدير التلقائي الذكي (AI Auto)", color = Color(0xFFECFDF5), fontWeight = FontWeight.SemiBold)
-                    Text("مفتاح إيقاف شامل فوري", color = Color(0xFF9CA3AF), style = MaterialTheme.typography.bodySmall)
+                    Section.SMART -> SmartCoreScreen(
+                        lastLatency = lastLatency,
+                        autoEnabled = autoEnabled,
+                        onToggleAuto = { enabled ->
+                            autoEnabled = enabled
+                            aiAutoManager.setMasterEnabled(enabled)
+                            statusBanner = if (enabled) str.bannerAutoOn else str.bannerAutoOff
+                        }
+                    )
+
+                    Section.CHAT -> RynChatScreen(lastLatency = lastLatency)
+
+                    Section.SETTINGS -> SettingsScreen(
+                        currentLanguage = language,
+                        onLanguageChange = onLanguageChange
+                    )
                 }
-                Switch(checked = autoEnabled, onCheckedChange = onToggleAuto)
-            }
-        }
-
-        Row(horizontalArrangement = Arrangement.spacedBy(10.dp), modifier = Modifier.fillMaxWidth()) {
-            Button(
-                onClick = onGoToDownloads,
-                colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF10B981)),
-                modifier = Modifier.weight(1f)
-            ) {
-                Text("مدير التنزيلات", color = Color(0xFF041C14), fontWeight = FontWeight.Bold)
-            }
-            OutlinedButton(onClick = onGoToNetwork, modifier = Modifier.weight(1f)) {
-                Text("فحص الشبكة", color = Color(0xFF10B981))
             }
         }
     }
@@ -380,8 +396,8 @@ private object DownloadEngineHolder {
         }
 }
 
-private fun describeDownloadResult(res: RynResult<DownloadEntity>): String = when (res) {
-    is RynResult.Success -> "اكتمل التنزيل: ${res.data.fileName}"
+private fun describeDownloadResult(str: RynStrings, res: RynResult<DownloadEntity>): String = when (res) {
+    is RynResult.Success -> str.downloadDone(res.data.fileName)
     is RynResult.Failure ->
-        if (res.code == "DOWNLOAD_INTERRUPTED") "تم إيقاف التنزيل" else "فشل التنزيل: ${res.message}"
+        if (res.code == "DOWNLOAD_INTERRUPTED") str.downloadInterrupted else str.downloadFailed(res.message)
 }

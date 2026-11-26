@@ -34,6 +34,12 @@
             </intent-filter>
         </activity>
 
+        <!-- Keeps the process alive and shows progress while downloads run in the background -->
+        <service
+            android:name=".DownloadForegroundService"
+            android:exported="false"
+            android:foregroundServiceType="dataSync" />
+
         <!-- Hardened WireGuard VpnService with OS-Level Kill Switch -->
         <service
             android:name="com.ryn.aispeed.feature.vpn.RynVpnService"
